@@ -1,11 +1,18 @@
 import SwiftUI
 
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
 public struct ProfileView: View {
     private let config: LLMGatewayKitConfig
     private let authService: AuthService
     private let subscriptionService: SubscriptionService
     private let onRequestUpgrade: () -> Void
     @State private var usage: UsageInfo?
+    @State private var avatarImage: Image?
     @State private var errorMessage: String?
 
     public init(
@@ -64,7 +71,7 @@ public struct ProfileView: View {
                         HStack {
                             Text("使用量")
                             Spacer()
-                            Text("\(usage.formattedBudgetUsed) / \(usage.formattedBudgetLimit)")
+                            Text("\(Int(usage.percentage.rounded()))%")
                                 .foregroundStyle(.secondary)
                         }
                         ProgressView(value: min(max(usage.percentage / 100.0, 0), 1))
@@ -86,18 +93,28 @@ public struct ProfileView: View {
             guard authService.isLoggedIn else { return }
             usage = try? await authService.fetchUsage()
             await subscriptionService.loadProducts()
+            if let data = await authService.loadAvatarDataIfNeeded() {
+                avatarImage = Self.image(from: data)
+            }
         }
     }
 
     @ViewBuilder
     private var avatar: some View {
         ZStack {
-            Circle().fill(.secondary.opacity(0.15))
-            Text(Self.initial(from: authService.currentUser?.displayName ?? authService.currentUser?.email))
-                .font(.headline.bold())
-                .foregroundStyle(.secondary)
+            if let avatarImage {
+                avatarImage
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Circle().fill(.secondary.opacity(0.15))
+                Text(Self.initial(from: authService.currentUser?.displayName ?? authService.currentUser?.email))
+                    .font(.headline.bold())
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(width: 56, height: 56)
+        .clipShape(Circle())
         .rainbowAvatarBorder(isActive: authService.currentUser?.tier == "paid", size: 56)
     }
 
@@ -106,5 +123,18 @@ public struct ProfileView: View {
             return "?"
         }
         return String(first).uppercased()
+    }
+
+    public static func image(from data: Data?) -> Image? {
+        guard let data else { return nil }
+        #if canImport(UIKit)
+        guard let ui = UIImage(data: data) else { return nil }
+        return Image(uiImage: ui)
+        #elseif canImport(AppKit)
+        guard let ns = NSImage(data: data) else { return nil }
+        return Image(nsImage: ns)
+        #else
+        return nil
+        #endif
     }
 }
