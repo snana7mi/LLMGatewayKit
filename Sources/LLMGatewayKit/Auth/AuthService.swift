@@ -56,6 +56,7 @@ public final class AuthService {
         isLoggedIn = true
         currentUser = parsed.user
         defaults.set(appleSub, forKey: Keys.cachedAppleSub)
+        try? await fetchAccount()
     }
 
     public func authenticateInteractively() async throws {

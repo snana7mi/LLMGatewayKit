@@ -63,7 +63,9 @@ public struct ProfileView: View {
                         Text(authService.currentUser?.tier == "paid" ? "Pro" : "Free")
                             .foregroundStyle(.secondary)
                     }
-                    Button("アップグレード", action: onRequestUpgrade)
+                    if authService.currentUser?.tier != "paid" {
+                        Button("アップグレード", action: onRequestUpgrade)
+                    }
                 }
 
                 Section("Usage") {
@@ -91,6 +93,7 @@ public struct ProfileView: View {
         .navigationTitle("プロフィール")
         .task(id: authService.isLoggedIn) {
             guard authService.isLoggedIn else { return }
+            try? await authService.fetchAccount()
             usage = try? await authService.fetchUsage()
             await subscriptionService.loadProducts()
             if let data = await authService.loadAvatarDataIfNeeded() {
