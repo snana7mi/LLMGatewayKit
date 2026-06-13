@@ -14,6 +14,7 @@ public final class AuthService {
 
     public enum Keys {
         public static let cachedAppleSub = "LLMGatewayKit.cachedAppleSub"
+        public static let cachedAccountUser = AccountProfileCache.Keys.cachedAccountUser
         public static let migrationDone = "LLMGatewayKit.migrationDone"
     }
 
@@ -22,6 +23,7 @@ public final class AuthService {
     private let appleBridge: AppleSignInAuthenticating
     private let session: URLSession
     private let defaults: UserDefaults
+    private let profileCache: AccountProfileCache
     private var refreshTask: Task<String, Error>?
     private var cachedAvatarURL: String?
 
@@ -36,6 +38,23 @@ public final class AuthService {
         self.appleBridge = appleBridge ?? AppleSignInBridge()
         self.session = session
         self.defaults = .standard
+        self.profileCache = AccountProfileCache(defaults: .standard)
+    }
+
+    init(
+        config: LLMGatewayKitConfig,
+        tokenStore: TokenStoring,
+        appleBridge: AppleSignInAuthenticating,
+        session: URLSession,
+        defaults: UserDefaults,
+        profileCache: AccountProfileCache
+    ) {
+        self.config = config
+        self.tokenStore = tokenStore
+        self.appleBridge = appleBridge
+        self.session = session
+        self.defaults = defaults
+        self.profileCache = profileCache
     }
 
     public func authenticate(identityToken: Data, fullName: String?, appleSub: String) async throws {
@@ -54,7 +73,9 @@ public final class AuthService {
         let parsed = try Self.parseTokenResponse(data)
         try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
         isLoggedIn = true
-        currentUser = parsed.user
+        if let parsedUser = parsed.user {
+            setCurrentUser(parsedUser)
+        }
         defaults.set(appleSub, forKey: Keys.cachedAppleSub)
         try? await fetchAccount()
     }
@@ -69,6 +90,9 @@ public final class AuthService {
         let hasAccess = ((try? tokenStore.loadAccessToken()) ?? nil) != nil
         let hasRefresh = ((try? tokenStore.loadRefreshToken()) ?? nil) != nil
         isLoggedIn = hasAccess && hasRefresh
+        if isLoggedIn {
+            restorePersistedProfile()
+        }
     }
 
     public func validAccessToken() async throws -> String {
@@ -103,11 +127,13 @@ public final class AuthService {
     }
 
     public func logout() async {
+        let userID = currentUser?.id
         try? tokenStore.clear()
         isLoggedIn = false
         currentUser = nil
         cachedAvatarData = nil
         cachedAvatarURL = nil
+        profileCache.clear(userID: userID)
         defaults.removeObject(forKey: Keys.cachedAppleSub)
     }
 
@@ -126,7 +152,7 @@ public final class AuthService {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let data = try await performJSON(request)
         let payload = try JSONDecoder.gateway.decode(AccountPayload.self, from: data)
-        currentUser = payload.user
+        setCurrentUser(payload.user)
     }
 
     public func fetchUsage() async throws -> UsageInfo {
@@ -153,7 +179,7 @@ public final class AuthService {
         }
 
         if let user = currentUser {
-            currentUser = AccountUser(
+            setCurrentUser(AccountUser(
                 id: user.id,
                 email: user.email,
                 displayName: user.displayName,
@@ -161,10 +187,13 @@ public final class AuthService {
                 tierExpiresAt: user.tierExpiresAt,
                 createdAt: user.createdAt,
                 avatarURL: avatarURL
-            )
+            ))
         }
         cachedAvatarData = imageData
         cachedAvatarURL = avatarURL
+        if let userID = currentUser?.id {
+            profileCache.saveAvatar(imageData, userID: userID, avatarURL: avatarURL)
+        }
         return avatarURL
     }
 
@@ -173,17 +202,41 @@ public final class AuthService {
         if urlString == cachedAvatarURL, let cachedAvatarData {
             return cachedAvatarData
         }
+        if let userID = currentUser?.id,
+           let diskData = profileCache.loadAvatar(userID: userID, expectedAvatarURL: urlString) {
+            cachedAvatarData = diskData
+            cachedAvatarURL = urlString
+            return diskData
+        }
         guard let url = URL(string: urlString),
               let (data, _) = try? await session.data(from: url) else {
             return nil
         }
         cachedAvatarData = data
         cachedAvatarURL = urlString
+        if let userID = currentUser?.id {
+            profileCache.saveAvatar(data, userID: userID, avatarURL: urlString)
+        }
         return data
     }
 
     public func updateCurrentUser(_ user: AccountUser) {
+        setCurrentUser(user)
+    }
+
+    private func setCurrentUser(_ user: AccountUser) {
         currentUser = user
+        profileCache.saveUser(user)
+    }
+
+    private func restorePersistedProfile() {
+        guard let user = profileCache.loadUser() else { return }
+        currentUser = user
+        guard let avatarURL = user.avatarURL, !avatarURL.isEmpty else { return }
+        if let data = profileCache.loadAvatar(userID: user.id, expectedAvatarURL: avatarURL) {
+            cachedAvatarData = data
+            cachedAvatarURL = avatarURL
+        }
     }
 
     private func performRefresh() async throws -> String {

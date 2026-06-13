@@ -136,4 +136,150 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertTrue(sut.isLoggedIn)
         XCTAssertEqual(UserDefaults.standard.string(forKey: AuthService.Keys.cachedAppleSub), "sub-x")
     }
+
+    @MainActor
+    func test_restoreSession_loadsPersistedUserAndAvatar() throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let avatarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LLMGatewayKitTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: avatarDir) }
+
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
+
+        let user = AccountUser(
+            id: "u1", email: "e@x.com", displayName: "Lee", tier: "paid",
+            tierExpiresAt: nil, createdAt: nil, avatarURL: "https://cdn.test/a.jpg")
+        let avatarData = Data([0xFF, 0xD8, 0xFF])
+        let cache = AccountProfileCache(defaults: defaults, avatarDirectory: avatarDir)
+        cache.saveUser(user)
+        cache.saveAvatar(avatarData, userID: user.id, avatarURL: user.avatarURL!)
+
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: cache
+        )
+        sut.restoreSession()
+
+        XCTAssertTrue(sut.isLoggedIn)
+        XCTAssertEqual(sut.currentUser?.displayName, "Lee")
+        XCTAssertEqual(sut.cachedAvatarData, avatarData)
+    }
+
+    @MainActor
+    func test_fetchAccount_persistsUserForNextLaunch() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let avatarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LLMGatewayKitTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: avatarDir) }
+
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
+        URLProtocolStub.reset(responses: [.success(body: #"{"user":{"id":"u","email":"e","displayName":"D","tier":"paid","avatarURL":"https://x"}}"#, status: 200)])
+        let cache = AccountProfileCache(defaults: defaults, avatarDirectory: avatarDir)
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: cache
+        )
+        sut.restoreSession()
+
+        try await sut.fetchAccount()
+
+        let relaunched = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: cache
+        )
+        relaunched.restoreSession()
+
+        XCTAssertEqual(relaunched.currentUser?.tier, "paid")
+        XCTAssertEqual(relaunched.currentUser?.avatarURL, "https://x")
+    }
+
+    @MainActor
+    func test_loadAvatarDataIfNeeded_usesDiskCacheWithoutNetwork() async {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let avatarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LLMGatewayKitTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: avatarDir) }
+
+        let store = InMemoryTokenStore()
+        try? store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
+        let avatarURL = "https://cdn.test/avatar.jpg"
+        let avatarData = Data([0x01, 0x02, 0x03])
+        let cache = AccountProfileCache(defaults: defaults, avatarDirectory: avatarDir)
+        cache.saveUser(.init(id: "u", email: nil, displayName: nil, tier: "free",
+                             tierExpiresAt: nil, createdAt: nil, avatarURL: avatarURL))
+        cache.saveAvatar(avatarData, userID: "u", avatarURL: avatarURL)
+
+        URLProtocolStub.reset()
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: cache
+        )
+        sut.restoreSession()
+
+        let loaded = await sut.loadAvatarDataIfNeeded()
+
+        XCTAssertEqual(loaded, avatarData)
+        XCTAssertTrue(URLProtocolStub.requests.isEmpty)
+    }
+
+    @MainActor
+    func test_logout_clearsPersistedProfile() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let avatarDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LLMGatewayKitTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: avatarDir) }
+
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
+        let cache = AccountProfileCache(defaults: defaults, avatarDirectory: avatarDir)
+        cache.saveUser(.init(id: "u", email: nil, displayName: "N", tier: "free",
+                             tierExpiresAt: nil, createdAt: nil, avatarURL: "https://x"))
+        cache.saveAvatar(Data([0xAA]), userID: "u", avatarURL: "https://x")
+        defaults.set("sub", forKey: AuthService.Keys.cachedAppleSub)
+
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: cache
+        )
+        sut.restoreSession()
+
+        await sut.logout()
+
+        XCTAssertNil(defaults.data(forKey: AuthService.Keys.cachedAccountUser))
+        XCTAssertNil(defaults.string(forKey: AccountProfileCache.Keys.cachedAvatarURL(userID: "u")))
+    }
 }
