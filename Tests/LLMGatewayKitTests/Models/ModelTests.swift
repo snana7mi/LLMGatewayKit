@@ -1,7 +1,7 @@
 import XCTest
 @testable import LLMGatewayKit
 
-final class AccountUserTests: XCTestCase {
+final class AccountUserEqualityTests: XCTestCase {
     func test_equality() {
         let a = AccountUser(id: "u1", email: "e@x", displayName: "N", tier: "paid", tierExpiresAt: nil, createdAt: nil, avatarURL: nil)
         let b = AccountUser(id: "u1", email: "e@x", displayName: "N", tier: "paid", tierExpiresAt: nil, createdAt: nil, avatarURL: nil)

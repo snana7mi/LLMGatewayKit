@@ -186,7 +186,8 @@ public final class AuthService {
                 tier: user.tier,
                 tierExpiresAt: user.tierExpiresAt,
                 createdAt: user.createdAt,
-                avatarURL: avatarURL
+                avatarURL: avatarURL,
+                memberNo: user.memberNo
             ))
         }
         cachedAvatarData = imageData

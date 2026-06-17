@@ -8,6 +8,7 @@ public struct AccountUser: Codable, Equatable, Sendable {
     public let tierExpiresAt: String?
     public let createdAt: String?
     public let avatarURL: String?
+    public let memberNo: Int?
 
     public init(
         id: String,
@@ -16,7 +17,8 @@ public struct AccountUser: Codable, Equatable, Sendable {
         tier: String,
         tierExpiresAt: String?,
         createdAt: String?,
-        avatarURL: String?
+        avatarURL: String?,
+        memberNo: Int? = nil
     ) {
         self.id = id
         self.email = email
@@ -25,5 +27,6 @@ public struct AccountUser: Codable, Equatable, Sendable {
         self.tierExpiresAt = tierExpiresAt
         self.createdAt = createdAt
         self.avatarURL = avatarURL
+        self.memberNo = memberNo
     }
 }
