@@ -155,6 +155,18 @@ public final class AuthService {
         setCurrentUser(payload.user)
     }
 
+    public func updateDisplayName(_ name: String) async throws {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/account"))
+        request.httpMethod = "PATCH"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["displayName": name])
+        let data = try await performJSON(request)
+        let payload = try JSONDecoder.gateway.decode(AccountPayload.self, from: data)
+        setCurrentUser(payload.user)
+    }
+
     public func fetchUsage() async throws -> UsageInfo {
         let token = try await validAccessToken()
         var request = URLRequest(url: try endpoint("/usage"))

@@ -282,4 +282,25 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: AuthService.Keys.cachedAccountUser))
         XCTAssertNil(defaults.string(forKey: AccountProfileCache.Keys.cachedAvatarURL(userID: "u")))
     }
+
+    @MainActor
+    func test_updateDisplayName_patchesAndUpdatesCurrentUser() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"user":{"id":"u","tier":"free","displayName":"New","memberNo":7}}"#, status: 200)])
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(3600))
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .success(.init(identityToken: "t", appleUserId: "sub"))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+
+        try await sut.updateDisplayName("New")
+
+        XCTAssertEqual(sut.currentUser?.displayName, "New")
+        XCTAssertEqual(sut.currentUser?.memberNo, 7)
+        let last = URLProtocolStub.requests.last
+        XCTAssertEqual(last?.httpMethod, "PATCH")
+        XCTAssertEqual(last?.url?.path, "/account")
+    }
 }
