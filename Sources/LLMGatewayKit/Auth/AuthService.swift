@@ -167,6 +167,19 @@ public final class AuthService {
         setCurrentUser(payload.user)
     }
 
+    public func updateBio(_ bio: String?) async throws {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/account"))
+        request.httpMethod = "PATCH"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let bioValue: Any = bio ?? NSNull()
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["bio": bioValue])
+        let data = try await performJSON(request)
+        let payload = try JSONDecoder.gateway.decode(AccountPayload.self, from: data)
+        setCurrentUser(payload.user)
+    }
+
     public func fetchUsage() async throws -> UsageInfo {
         let token = try await validAccessToken()
         var request = URLRequest(url: try endpoint("/usage"))
@@ -199,7 +212,8 @@ public final class AuthService {
                 tierExpiresAt: user.tierExpiresAt,
                 createdAt: user.createdAt,
                 avatarURL: avatarURL,
-                memberNo: user.memberNo
+                memberNo: user.memberNo,
+                bio: user.bio
             ))
         }
         cachedAvatarData = imageData

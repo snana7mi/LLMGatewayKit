@@ -303,4 +303,32 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(last?.httpMethod, "PATCH")
         XCTAssertEqual(last?.url?.path, "/account")
     }
+
+    @MainActor
+    func test_updateBio_patchesAndUpdatesCurrentUser() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"user":{"id":"u","tier":"free","displayName":"New","memberNo":7,"bio":"hi"}}"#, status: 200)])
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(3600))
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .success(.init(identityToken: "t", appleUserId: "sub"))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+
+        try await sut.updateBio("hi")
+
+        XCTAssertEqual(sut.currentUser?.bio, "hi")
+        let last = URLProtocolStub.requests.last
+        XCTAssertEqual(last?.httpMethod, "PATCH")
+        XCTAssertEqual(last?.url?.path, "/account")
+    }
+
+    func test_updateBio_nilSerializesToJSONNull() throws {
+        let bio: String? = nil
+        let bioValue: Any = bio ?? NSNull()
+        let data = try JSONSerialization.data(withJSONObject: ["bio": bioValue])
+        let json = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(json.contains("null"), "expected JSON null for cleared bio, got: \(json)")
+    }
 }
