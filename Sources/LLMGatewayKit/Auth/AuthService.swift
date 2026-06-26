@@ -83,7 +83,7 @@ public final class AuthService {
     public func authenticateInteractively() async throws {
         let pair = NonceGenerator.makePair()
         let result = try await appleBridge.authenticate(nonceRaw: pair.raw, hashedNonce: pair.hashedSHA256)
-        try await authenticate(identityToken: Data(result.identityToken.utf8), fullName: nil, appleSub: result.appleUserId)
+        try await authenticate(identityToken: Data(result.identityToken.utf8), fullName: result.fullName, appleSub: result.appleUserId)
     }
 
     public func restoreSession() {

@@ -331,4 +331,32 @@ final class AuthServiceTests: XCTestCase {
         let json = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(json.contains("null"), "expected JSON null for cleared bio, got: \(json)")
     }
+
+    @MainActor
+    func test_authenticateInteractively_forwardsFullNameAsDisplayName() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
+        let bridge = MockAppleSignInBridge(result: .success(.init(identityToken: "raw", appleUserId: "sub", fullName: "Taro Tanaka")))
+        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()))
+
+        try await sut.authenticateInteractively()
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(json["displayName"] as? String, "Taro Tanaka")
+    }
+
+    @MainActor
+    func test_authenticateInteractively_nilFullName_omitsDisplayName() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
+        let bridge = MockAppleSignInBridge(result: .success(.init(identityToken: "raw", appleUserId: "sub", fullName: nil)))
+        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()))
+
+        try await sut.authenticateInteractively()
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertNil(json["displayName"])
+    }
 }

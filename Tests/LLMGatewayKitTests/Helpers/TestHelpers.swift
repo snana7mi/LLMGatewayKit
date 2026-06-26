@@ -23,10 +23,12 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 
     nonisolated(unsafe) static var responses: [Response] = []
     nonisolated(unsafe) static var requests: [URLRequest] = []
+    nonisolated(unsafe) static var requestBodies: [Data?] = []
 
     static func reset(responses newResponses: [Response] = []) {
         responses = newResponses
         requests = []
+        requestBodies = []
     }
 
     static func makeConfig() -> URLSessionConfiguration {
@@ -40,6 +42,7 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         Self.requests.append(request)
+        Self.requestBodies.append(Self.readBody(request))
         guard !Self.responses.isEmpty else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
@@ -58,6 +61,23 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+
+    private static func readBody(_ request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let size = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: size)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: size)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
 }
 
 final class MockAppleSignInBridge: AppleSignInAuthenticating, @unchecked Sendable {

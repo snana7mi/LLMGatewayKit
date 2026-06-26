@@ -3,10 +3,12 @@ import Foundation
 public struct AppleSignInResult: Equatable, Sendable {
     public let identityToken: String
     public let appleUserId: String
+    public let fullName: String?
 
-    public init(identityToken: String, appleUserId: String) {
+    public init(identityToken: String, appleUserId: String, fullName: String? = nil) {
         self.identityToken = identityToken
         self.appleUserId = appleUserId
+        self.fullName = fullName
     }
 }
 
@@ -54,7 +56,11 @@ extension AppleSignInBridge: ASAuthorizationControllerDelegate {
                 continuation?.resume(throwing: AuthError.invalidResponse)
                 return
             }
-            continuation?.resume(returning: .init(identityToken: token, appleUserId: credential.user))
+            continuation?.resume(returning: .init(
+                identityToken: token,
+                appleUserId: credential.user,
+                fullName: AppleNameFormatter.string(from: credential.fullName)
+            ))
         }
     }
 
