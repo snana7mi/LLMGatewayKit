@@ -449,9 +449,12 @@ final class AuthServiceTests: XCTestCase {
 
     @MainActor
     func test_authenticateInteractively_forwardsFullNameAsDisplayName() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
         let bridge = MockAppleSignInBridge(result: .success(.init(identityToken: "raw", appleUserId: "sub", fullName: "Taro Tanaka")))
-        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()), defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
 
         try await sut.authenticateInteractively()
 
@@ -463,9 +466,12 @@ final class AuthServiceTests: XCTestCase {
 
     @MainActor
     func test_authenticateInteractively_nilFullName_omitsDisplayName() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
         let bridge = MockAppleSignInBridge(result: .success(.init(identityToken: "raw", appleUserId: "sub", fullName: nil)))
-        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()), defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
 
         try await sut.authenticateInteractively()
 
@@ -473,6 +479,108 @@ final class AuthServiceTests: XCTestCase {
         let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
         XCTAssertNil(json["displayName"])
+    }
+
+    // MARK: - Apple's once-only full name: persist on capture + replay until the server has it
+    // Apple delivers credential.fullName only on the FIRST authorization per Apple-ID/app-group.
+    // The SDK must persist it the instant it arrives (before the fallible POST) and replay it on
+    // later sign-ins until the gateway has a name, so a transient failure never loses it forever.
+
+    @MainActor
+    func test_authenticate_persistsFullName_andReplaysAfterFailedPost() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // First attempt: Apple delivered the once-only name, but the /auth/apple POST fails.
+        URLProtocolStub.reset(responses: [.failure(URLError(.timedOut))])
+        let first = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+        do {
+            try await first.authenticate(identityToken: Data("t".utf8), fullName: "Taro Tanaka", appleSub: "sub")
+            XCTFail("expected the failed POST to throw")
+        } catch { /* expected: transient failure */ }
+
+        // Relaunch + retry: Apple no longer provides the name (group already authorized).
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200),
+            .success(body: #"{"user":{"id":"u","tier":"free"}}"#, status: 200),   // fetchAccount
+        ])
+        let second = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+        try await second.authenticate(identityToken: Data("t".utf8), fullName: nil, appleSub: "sub")
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(URLProtocolStub.requestBodies[idx])) as? [String: Any])
+        XCTAssertEqual(body["displayName"] as? String, "Taro Tanaka", "the once-only Apple name must be replayed after a failed first POST")
+    }
+
+    @MainActor
+    func test_authenticate_doesNotReplay_afterServerHasName() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // First sign-in: name captured AND the server stores & returns it.
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free","displayName":"Taro Tanaka"}}"#, status: 200),
+            .success(body: #"{"user":{"id":"u","tier":"free","displayName":"Taro Tanaka"}}"#, status: 200),
+        ])
+        let sut = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+        try await sut.authenticate(identityToken: Data("t".utf8), fullName: "Taro Tanaka", appleSub: "sub")
+
+        // Later sign-in, Apple gives no name: nothing to replay (server already has one).
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free","displayName":"Taro Tanaka"}}"#, status: 200),
+            .success(body: #"{"user":{"id":"u","tier":"free","displayName":"Taro Tanaka"}}"#, status: 200),
+        ])
+        try await sut.authenticate(identityToken: Data("t".utf8), fullName: nil, appleSub: "sub")
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(URLProtocolStub.requestBodies[idx])) as? [String: Any])
+        XCTAssertNil(body["displayName"], "once the server has a name, the SDK should stop replaying")
+    }
+
+    @MainActor
+    func test_authenticate_pendingNameIsKeyedByAppleSub() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // subA captured a name but the POST failed → pending stored for subA only.
+        URLProtocolStub.reset(responses: [.failure(URLError(.timedOut))])
+        let a = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+        _ = try? await a.authenticate(identityToken: Data("t".utf8), fullName: "Taro Tanaka", appleSub: "subA")
+
+        // A different Apple user signs in with no name → must NOT inherit subA's pending name.
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u2","tier":"free"}}"#, status: 200),
+            .success(body: #"{"user":{"id":"u2","tier":"free"}}"#, status: 200),
+        ])
+        let b = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+        try await b.authenticate(identityToken: Data("t".utf8), fullName: nil, appleSub: "subB")
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(URLProtocolStub.requestBodies[idx])) as? [String: Any])
+        XCTAssertNil(body["displayName"], "a pending name for one Apple sub must not leak to another")
     }
 }
 

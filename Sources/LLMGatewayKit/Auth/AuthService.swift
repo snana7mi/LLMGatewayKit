@@ -61,12 +61,23 @@ public final class AuthService {
         guard let tokenString = String(data: identityToken, encoding: .utf8) else {
             throw AuthError.invalidResponse
         }
+        // Apple delivers credential.fullName ONLY on the first authorization per Apple-ID/app-group;
+        // every later sign-in (re-install, retry, or a sibling app sharing the same Sign in with Apple
+        // group) returns nil. So persist it the instant it arrives — BEFORE the fallible POST — and
+        // replay it on later sign-ins until the gateway has a name. This way a transient failure on the
+        // very first sign-in never loses the one-time name forever.
+        let incoming = fullName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let incoming, !incoming.isEmpty {
+            savePendingDisplayName(incoming, appleSub: appleSub)
+        }
+        let effectiveName = (incoming?.isEmpty == false ? incoming : nil) ?? pendingDisplayName(appleSub: appleSub)
+
         var body: [String: Any] = [
             "identityToken": tokenString,
             "deviceName": config.deviceName,
         ]
-        if let fullName, !fullName.isEmpty {
-            body["displayName"] = fullName
+        if let effectiveName, !effectiveName.isEmpty {
+            body["displayName"] = effectiveName
         }
 
         let data = try await postJSON(path: "/auth/apple", body: body)
@@ -78,6 +89,11 @@ public final class AuthService {
         }
         defaults.set(appleSub, forKey: Keys.cachedAppleSub)
         try? await fetchAccount()
+        // Server now has a name (the one we just sent, or one already stored by a sibling app) →
+        // stop replaying. Until confirmed, the pending name survives for the next sign-in attempt.
+        if let name = currentUser?.displayName, !name.isEmpty {
+            clearPendingDisplayName(appleSub: appleSub)
+        }
     }
 
     public func authenticateInteractively() async throws {
@@ -261,6 +277,26 @@ public final class AuthService {
     private func setCurrentUser(_ user: AccountUser) {
         currentUser = user
         profileCache.saveUser(user)
+    }
+
+    // MARK: - Pending Apple display name (once-only name survives a failed/retried first sign-in)
+
+    private func pendingDisplayNameKey(_ appleSub: String) -> String {
+        "LLMGatewayKit.pendingDisplayName.\(appleSub)"
+    }
+
+    private func pendingDisplayName(appleSub: String) -> String? {
+        let value = defaults.string(forKey: pendingDisplayNameKey(appleSub))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (value?.isEmpty == false) ? value : nil
+    }
+
+    private func savePendingDisplayName(_ name: String, appleSub: String) {
+        defaults.set(name, forKey: pendingDisplayNameKey(appleSub))
+    }
+
+    private func clearPendingDisplayName(appleSub: String) {
+        defaults.removeObject(forKey: pendingDisplayNameKey(appleSub))
     }
 
     private func restorePersistedProfile() {
