@@ -87,9 +87,16 @@ public final class AuthService {
     }
 
     public func restoreSession() {
-        let hasAccess = ((try? tokenStore.loadAccessToken()) ?? nil) != nil
-        let hasRefresh = ((try? tokenStore.loadRefreshToken()) ?? nil) != nil
-        isLoggedIn = hasAccess && hasRefresh
+        do {
+            let access = try tokenStore.loadAccessToken()
+            let refresh = try tokenStore.loadRefreshToken()
+            // 读成功且确实缺 token(errSecItemNotFound → nil)：真未登录。
+            isLoggedIn = access != nil && refresh != nil
+        } catch {
+            // 读 Keychain 抛错(多为锁屏 errSecInteractionNotAllowed)：token 状态未知，不能据此判未登录。
+            // 曾成功登录过(留有 cachedAppleSub)则乐观保留登录态，靠后续真实请求纠正，避免冷启误弹登录。
+            isLoggedIn = defaults.string(forKey: Keys.cachedAppleSub) != nil
+        }
         if isLoggedIn {
             restorePersistedProfile()
         }
@@ -267,20 +274,56 @@ public final class AuthService {
     }
 
     private func performRefresh() async throws -> String {
-        guard let refresh = try tokenStore.loadRefreshToken() else {
-            await logout()
+        // 凭据销毁的唯一合法时机：服务端权威拒绝 refresh token(401/403)。
+        // 一切临时失败(网络抖动、5xx、解析失败、Keychain 读/写失败)都必须保留会话、抛可重试错误，
+        // 否则用户会因为弱网/服务端抖动/锁屏而被反复登出、反复弹登录。
+        let storedRefresh: String?
+        do {
+            storedRefresh = try tokenStore.loadRefreshToken()
+        } catch {
+            // 读 Keychain 抛错(多为锁屏 errSecInteractionNotAllowed)：临时，保留会话，可重试。
+            throw AuthError.networkError
+        }
+        guard let refresh = storedRefresh else {
+            // 真的没有 refresh token(已登出/从未登录)：无可续期。不主动 logout，让交互入口自然重新登录。
             throw AuthError.notLoggedIn
         }
+
+        var request = URLRequest(url: try endpoint("/auth/refresh"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["refreshToken": refresh, "deviceName": config.deviceName])
+        request.timeoutInterval = 15
+
+        let data: Data
+        let statusCode: Int
         do {
-            let data = try await postJSON(path: "/auth/refresh", body: ["refreshToken": refresh, "deviceName": config.deviceName])
+            let (responseData, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AuthError.networkError   // 无 HTTP 响应：临时，保留会话
+            }
+            data = responseData
+            statusCode = http.statusCode
+        } catch is URLError {
+            throw AuthError.networkError       // 网络抖动/超时：临时，保留会话
+        }
+
+        if statusCode == 401 || statusCode == 403 {
+            // 权威拒绝：refresh token 真的被吊销/过期 → 销毁凭据并要求重新登录。
+            await logout()
+            throw AuthError.sessionExpired
+        }
+        guard (200...299).contains(statusCode) else {
+            throw AuthError.networkError       // 5xx 等服务端临时故障：保留会话，可重试
+        }
+
+        do {
             let parsed = try Self.parseTokenResponse(data)
             try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
             return parsed.accessToken
-        } catch is URLError {
-            throw AuthError.networkError
         } catch {
-            await logout()
-            throw AuthError.sessionExpired
+            // 解析失败(响应被截断/格式漂移) 或 Keychain 写失败：临时问题，别销毁凭据。
+            throw AuthError.networkError
         }
     }
 

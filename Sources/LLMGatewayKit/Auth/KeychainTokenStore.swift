@@ -55,6 +55,9 @@ public final class KeychainTokenStore: TokenStoring, @unchecked Sendable {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
+            // 默认 kSecAttrAccessibleWhenUnlocked 会让锁屏/后台(同步、推送注册)读写 token 失败，
+            // 进而级联触发误登出。AfterFirstUnlock：首次解锁后即可读写(含锁屏)；ThisDeviceOnly：不随备份迁移到他机。
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {

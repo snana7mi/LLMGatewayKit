@@ -35,6 +35,121 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(try store.loadAccessToken(), "new")
     }
 
+    // MARK: - Refresh resilience: only an authoritative 401 may destroy the session
+    // 反复登陆根因：临时失败（网络抖动/5xx/解析）不得清 token；只有服务端权威 401 才登出。
+
+    @MainActor
+    func test_refresh_networkError_preservesSession() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
+        URLProtocolStub.reset(responses: [.failure(URLError(.notConnectedToInternet))])
+        let sut = AuthService(config: TestConfig.make(), tokenStore: store,
+                              appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+                              session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        sut.restoreSession()
+
+        do {
+            _ = try await sut.validAccessToken()
+            XCTFail("expected a transient error")
+        } catch AuthError.networkError {
+            // expected: transient → session must survive
+        } catch {
+            XCTFail("expected networkError, got \(error)")
+        }
+
+        XCTAssertTrue(sut.isLoggedIn, "a network blip during refresh must NOT log the user out")
+        XCTAssertEqual(try store.loadAccessToken(), "old")
+        XCTAssertEqual(try store.loadRefreshToken(), "ref")
+    }
+
+    @MainActor
+    func test_refresh_serverError5xx_preservesSession() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
+        URLProtocolStub.reset(responses: [.success(body: #"{"error":"upstream unavailable"}"#, status: 503)])
+        let sut = AuthService(config: TestConfig.make(), tokenStore: store,
+                              appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+                              session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        sut.restoreSession()
+
+        do {
+            _ = try await sut.validAccessToken()
+            XCTFail("expected a transient error")
+        } catch AuthError.networkError {
+            // expected: 5xx is transient → session must survive
+        } catch {
+            XCTFail("expected networkError, got \(error)")
+        }
+
+        XCTAssertTrue(sut.isLoggedIn, "a transient 5xx during refresh must NOT log the user out")
+        XCTAssertEqual(try store.loadRefreshToken(), "ref")
+    }
+
+    @MainActor
+    func test_refresh_401_logsOut() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
+        URLProtocolStub.reset(responses: [.success(body: #"{"error":"Session revoked or not found"}"#, status: 401)])
+        let sut = AuthService(config: TestConfig.make(), tokenStore: store,
+                              appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+                              session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        sut.restoreSession()
+
+        do {
+            _ = try await sut.validAccessToken()
+            XCTFail("expected session expiry")
+        } catch AuthError.sessionExpired {
+            // expected: authoritative rejection → log out
+        } catch {
+            XCTFail("expected sessionExpired, got \(error)")
+        }
+
+        XCTAssertFalse(sut.isLoggedIn, "an authoritative 401 must log the user out")
+        XCTAssertNil(try store.loadRefreshToken())
+    }
+
+    @MainActor
+    func test_restoreSession_keychainReadError_keepsPriorLogin() {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("sub-x", forKey: AuthService.Keys.cachedAppleSub)   // evidence of a prior successful login
+
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: ThrowingTokenStore(),
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: AccountProfileCache(defaults: defaults)
+        )
+
+        sut.restoreSession()
+
+        XCTAssertTrue(sut.isLoggedIn, "a transient keychain read error (e.g. locked device) must NOT be treated as logged out")
+    }
+
+    @MainActor
+    func test_restoreSession_absentTokens_isLoggedOut() {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("sub-x", forKey: AuthService.Keys.cachedAppleSub)
+
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: InMemoryTokenStore(),   // empty: loads return nil (not throw)
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig()),
+            defaults: defaults,
+            profileCache: AccountProfileCache(defaults: defaults)
+        )
+
+        sut.restoreSession()
+
+        XCTAssertFalse(sut.isLoggedIn, "genuinely absent tokens (nil, not an error) means logged out")
+    }
+
     @MainActor
     func test_concurrentRefresh_coalescesIntoOneRequest() async throws {
         let store = InMemoryTokenStore()
@@ -359,4 +474,15 @@ final class AuthServiceTests: XCTestCase {
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
         XCTAssertNil(json["displayName"])
     }
+}
+
+/// 模拟 Keychain 读/写抛错（如锁屏时 errSecInteractionNotAllowed -25308），区别于「无 token」(返回 nil)。
+private final class ThrowingTokenStore: TokenStoring, @unchecked Sendable {
+    func save(accessToken: String, refreshToken: String, expiry: Date) throws {
+        throw AuthError.serverError("Keychain add -25308")
+    }
+    func loadAccessToken() throws -> String? { throw AuthError.serverError("Keychain read -25308") }
+    func loadRefreshToken() throws -> String? { throw AuthError.serverError("Keychain read -25308") }
+    func loadExpiry() throws -> Date? { throw AuthError.serverError("Keychain read -25308") }
+    func clear() throws {}
 }
