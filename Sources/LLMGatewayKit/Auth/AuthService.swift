@@ -16,11 +16,14 @@ public final class AuthService {
         public static let cachedAppleSub = "LLMGatewayKit.cachedAppleSub"
         public static let cachedAccountUser = AccountProfileCache.Keys.cachedAccountUser
         public static let migrationDone = "LLMGatewayKit.migrationDone"
+        /// provider 中立的「曾成功登录」标记（Apple/Google 都写）：锁屏冷启乐观保留登录态用
+        public static let lastLoginProviderUid = "LLMGatewayKit.lastLoginProviderUid"
     }
 
     private let config: LLMGatewayKitConfig
     private let tokenStore: TokenStoring
     private let appleBridge: AppleSignInAuthenticating
+    private let googleProvider: GoogleSignInProviding?
     private let session: URLSession
     private let defaults: UserDefaults
     private let profileCache: AccountProfileCache
@@ -31,7 +34,8 @@ public final class AuthService {
         config: LLMGatewayKitConfig,
         tokenStore: TokenStoring = KeychainTokenStore(),
         appleBridge: AppleSignInAuthenticating? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        googleProvider: GoogleSignInProviding? = nil
     ) {
         self.config = config
         self.tokenStore = tokenStore
@@ -39,6 +43,7 @@ public final class AuthService {
         self.session = session
         self.defaults = .standard
         self.profileCache = AccountProfileCache(defaults: .standard)
+        self.googleProvider = googleProvider
     }
 
     init(
@@ -47,7 +52,8 @@ public final class AuthService {
         appleBridge: AppleSignInAuthenticating,
         session: URLSession,
         defaults: UserDefaults,
-        profileCache: AccountProfileCache
+        profileCache: AccountProfileCache,
+        googleProvider: GoogleSignInProviding? = nil
     ) {
         self.config = config
         self.tokenStore = tokenStore
@@ -55,6 +61,7 @@ public final class AuthService {
         self.session = session
         self.defaults = defaults
         self.profileCache = profileCache
+        self.googleProvider = googleProvider
     }
 
     public func authenticate(identityToken: Data, fullName: String?, appleSub: String) async throws {
@@ -88,6 +95,7 @@ public final class AuthService {
             setCurrentUser(parsedUser)
         }
         defaults.set(appleSub, forKey: Keys.cachedAppleSub)
+        defaults.set(appleSub, forKey: Keys.lastLoginProviderUid)
         try? await fetchAccount()
         // Server now has a name (the one we just sent, or one already stored by a sibling app) →
         // stop replaying. Until confirmed, the pending name survives for the next sign-in attempt.
@@ -102,6 +110,112 @@ public final class AuthService {
         try await authenticate(identityToken: Data(result.identityToken.utf8), fullName: result.fullName, appleSub: result.appleUserId)
     }
 
+    /// provider 中立入口：apple 走既有路径（含 pendingDisplayName 重放），google 打 /auth/google。
+    public func authenticate(credential: SignInCredential) async throws {
+        switch credential.provider {
+        case .apple:
+            try await authenticate(
+                identityToken: Data(credential.idToken.utf8),
+                fullName: credential.displayName,
+                appleSub: credential.providerUid)
+        case .google:
+            var body: [String: Any] = [
+                "idToken": credential.idToken,
+                "deviceName": config.deviceName,
+            ]
+            if let nonce = credential.rawNonce {
+                body["nonce"] = nonce
+            }
+            let data = try await postJSON(path: "/auth/google", body: body)
+            let parsed = try Self.parseTokenResponse(data)
+            try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
+            isLoggedIn = true
+            if let parsedUser = parsed.user {
+                setCurrentUser(parsedUser)
+            }
+            defaults.set(credential.providerUid, forKey: Keys.lastLoginProviderUid)
+            try? await fetchAccount()
+        }
+    }
+
+    public func authenticateWithGoogleInteractively() async throws {
+        guard let googleProvider else { throw AuthError.googleProviderUnavailable }
+        let credential = try await googleProvider.signIn()
+        try await authenticate(credential: credential)
+    }
+
+    // MARK: - Account linking
+
+    public func linkGoogleAccount() async throws {
+        guard let googleProvider else { throw AuthError.googleProviderUnavailable }
+        let credential = try await googleProvider.signIn()
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/auth/link/google"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["idToken": credential.idToken]
+        if let nonce = credential.rawNonce { body["nonce"] = nonce }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        _ = try await performLinkRequest(request)
+        try? await fetchAccount()
+    }
+
+    public func linkAppleAccount() async throws {
+        let pair = NonceGenerator.makePair()
+        let result = try await appleBridge.authenticate(nonceRaw: pair.raw, hashedNonce: pair.hashedSHA256)
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/auth/link/apple"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "identityToken": result.identityToken,
+            "nonce": pair.raw,   // 网关 verifyAppleIdentityToken 对 raw 做 SHA-256 后比对
+        ])
+        _ = try await performLinkRequest(request)
+        try? await fetchAccount()
+    }
+
+    public func unlink(provider: AuthProvider) async throws {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/auth/link/\(provider.rawValue)"))
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        _ = try await performLinkRequest(request)
+        try? await fetchAccount()
+    }
+
+    /// 同 performJSON，但把关联/解绑的业务错误码映射为类型化 AuthError。
+    private func performLinkRequest(_ request: URLRequest) async throws -> Data {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AuthError.networkError
+            }
+            if http.statusCode == 409 {
+                throw AuthError.identityAlreadyLinked
+            }
+            if http.statusCode == 400,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["error"] as? String == "cannot_unlink_last_identity" {
+                throw AuthError.cannotUnlinkLastIdentity
+            }
+            guard (200...299).contains(http.statusCode) else {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = json["error"] as? String ?? json["message"] as? String {
+                    throw AuthError.serverError(message)
+                }
+                throw AuthError.serverError("HTTP \(http.statusCode)")
+            }
+            return data
+        } catch let error as AuthError {
+            throw error
+        } catch is URLError {
+            throw AuthError.networkError
+        }
+    }
+
     public func restoreSession() {
         do {
             let access = try tokenStore.loadAccessToken()
@@ -110,8 +224,10 @@ public final class AuthService {
             isLoggedIn = access != nil && refresh != nil
         } catch {
             // 读 Keychain 抛错(多为锁屏 errSecInteractionNotAllowed)：token 状态未知，不能据此判未登录。
-            // 曾成功登录过(留有 cachedAppleSub)则乐观保留登录态，靠后续真实请求纠正，避免冷启误弹登录。
+            // 曾成功登录过(留有 cachedAppleSub / lastLoginProviderUid)则乐观保留登录态，
+            // 靠后续真实请求纠正，避免冷启误弹登录（Google-only 用户同样覆盖）。
             isLoggedIn = defaults.string(forKey: Keys.cachedAppleSub) != nil
+                || defaults.string(forKey: Keys.lastLoginProviderUid) != nil
         }
         if isLoggedIn {
             restorePersistedProfile()
@@ -158,6 +274,7 @@ public final class AuthService {
         cachedAvatarURL = nil
         profileCache.clear(userID: userID)
         defaults.removeObject(forKey: Keys.cachedAppleSub)
+        defaults.removeObject(forKey: Keys.lastLoginProviderUid)
     }
 
     public func deleteAccount() async throws {
@@ -236,7 +353,8 @@ public final class AuthService {
                 createdAt: user.createdAt,
                 avatarURL: avatarURL,
                 memberNo: user.memberNo,
-                bio: user.bio
+                bio: user.bio,
+                linkedProviders: user.linkedProviders
             ))
         }
         cachedAvatarData = imageData

@@ -10,6 +10,8 @@ public struct AccountUser: Codable, Equatable, Sendable {
     public let avatarURL: String?
     public let memberNo: Int?
     public let bio: String?
+    /// 已绑定的登录 provider（"apple"/"google"）；旧网关响应无此字段 → nil
+    public let linkedProviders: [String]?
 
     public init(
         id: String,
@@ -20,7 +22,8 @@ public struct AccountUser: Codable, Equatable, Sendable {
         createdAt: String?,
         avatarURL: String?,
         memberNo: Int? = nil,
-        bio: String? = nil
+        bio: String? = nil,
+        linkedProviders: [String]? = nil
     ) {
         self.id = id
         self.email = email
@@ -31,5 +34,6 @@ public struct AccountUser: Codable, Equatable, Sendable {
         self.avatarURL = avatarURL
         self.memberNo = memberNo
         self.bio = bio
+        self.linkedProviders = linkedProviders
     }
 }

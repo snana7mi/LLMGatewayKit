@@ -137,3 +137,10 @@ final class ArrayMerger: SyncMerging, @unchecked Sendable {
         applied.first?.entityID
     }
 }
+
+@MainActor
+final class MockGoogleSignInProviding: GoogleSignInProviding {
+    var result: Result<SignInCredential, Error>
+    init(result: Result<SignInCredential, Error>) { self.result = result }
+    func signIn() async throws -> SignInCredential { try result.get() }
+}
