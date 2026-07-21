@@ -12,6 +12,11 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
     case identityAlreadyLinked
     case cannotUnlinkLastIdentity
     case userCancelled
+    case emailCodeInvalid
+    case emailCodeExpired
+    case emailTooManyAttempts
+    case invalidEmail
+    case emailRateLimited
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +42,16 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
             return "You can't unlink your only sign-in method."
         case .userCancelled:
             return "Sign-in was cancelled."   // 含 "cancel"：现有 UI 的取消静默过滤直接生效
+        case .emailCodeInvalid:
+            return "That code isn't right. Please check and try again."
+        case .emailCodeExpired:
+            return "That code has expired. Please request a new one."
+        case .emailTooManyAttempts:
+            return "Too many attempts. Please request a new code."
+        case .invalidEmail:
+            return "Please enter a valid email address."
+        case .emailRateLimited:
+            return "Too many requests. Please wait a bit and try again."
         }
     }
 }

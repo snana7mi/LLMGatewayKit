@@ -135,6 +135,9 @@ public final class AuthService {
             }
             defaults.set(credential.providerUid, forKey: Keys.lastLoginProviderUid)
             try? await fetchAccount()
+        case .email:
+            // 邮箱登录是 start → verify 两步流程，不接受一阶段 SignInCredential。
+            throw AuthError.invalidResponse
         }
     }
 
@@ -142,6 +145,79 @@ public final class AuthService {
         guard let googleProvider else { throw AuthError.googleProviderUnavailable }
         let credential = try await googleProvider.signIn()
         try await authenticate(credential: credential)
+    }
+
+    // MARK: - Email OTP login (passwordless)
+
+    /// 请求邮箱验证码（登录/注册合一）。邮箱原样上行，规范化只由后端负责。
+    public func startEmailCode(email: String, locale: String? = nil) async throws {
+        var request = URLRequest(url: try endpoint("/auth/email/start"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "email": email,
+            "locale": locale ?? Locale.current.identifier,
+        ])
+        request.timeoutInterval = 15
+        _ = try await performEmailRequest(request)
+    }
+
+    /// 校验验证码并完成登录/注册；成功后保存 token 并刷新账户资料。
+    public func signInWithEmailCode(email: String, code: String) async throws {
+        var request = URLRequest(url: try endpoint("/auth/email/verify"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "email": email,
+            "code": code,
+            "deviceName": config.deviceName,
+        ])
+        request.timeoutInterval = 15
+
+        let data = try await performEmailRequest(request)
+        let parsed = try Self.parseTokenResponse(data)
+        try tokenStore.save(
+            accessToken: parsed.accessToken,
+            refreshToken: parsed.refreshToken,
+            expiry: parsed.expiry
+        )
+        isLoggedIn = true
+        if let parsedUser = parsed.user {
+            setCurrentUser(parsedUser)
+        }
+        defaults.set(email, forKey: Keys.lastLoginProviderUid)
+        try? await fetchAccount()
+    }
+
+    /// 请求绑定/改绑邮箱验证码；邮箱已属于其他账号时映射为 identityAlreadyLinked。
+    public func startLinkEmailCode(email: String, locale: String? = nil) async throws {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/auth/link/email/start"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "email": email,
+            "locale": locale ?? Locale.current.identifier,
+        ])
+        request.timeoutInterval = 15
+        _ = try await performEmailRequest(request)
+    }
+
+    /// 校验验证码完成绑定或改绑；成功后刷新展示邮箱与 linkedProviders。
+    public func linkEmail(email: String, code: String) async throws {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/auth/link/email"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "email": email,
+            "code": code,
+        ])
+        request.timeoutInterval = 15
+        _ = try await performEmailRequest(request)
+        try? await fetchAccount()
     }
 
     // MARK: - Account linking
@@ -200,6 +276,50 @@ public final class AuthService {
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                json["error"] as? String == "cannot_unlink_last_identity" {
                 throw AuthError.cannotUnlinkLastIdentity
+            }
+            guard (200...299).contains(http.statusCode) else {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = json["error"] as? String ?? json["message"] as? String {
+                    throw AuthError.serverError(message)
+                }
+                throw AuthError.serverError("HTTP \(http.statusCode)")
+            }
+            return data
+        } catch let error as AuthError {
+            throw error
+        } catch is URLError {
+            throw AuthError.networkError
+        }
+    }
+
+    /// 邮箱端点错误映射：把 OTP、限频和占用错误转成类型化 AuthError。
+    private func performEmailRequest(_ request: URLRequest) async throws -> Data {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AuthError.networkError
+            }
+            if http.statusCode == 429 {
+                throw AuthError.emailRateLimited
+            }
+            if http.statusCode == 409 {
+                throw AuthError.identityAlreadyLinked
+            }
+            if http.statusCode == 400 {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let code = json?["error"] as? String
+                switch code {
+                case "email_code_invalid":
+                    throw AuthError.emailCodeInvalid
+                case "email_code_expired":
+                    throw AuthError.emailCodeExpired
+                case "email_too_many_attempts":
+                    throw AuthError.emailTooManyAttempts
+                case "invalid_email":
+                    throw AuthError.invalidEmail
+                default:
+                    throw AuthError.serverError(code ?? "HTTP 400")
+                }
             }
             guard (200...299).contains(http.statusCode) else {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

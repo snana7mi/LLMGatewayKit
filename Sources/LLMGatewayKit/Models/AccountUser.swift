@@ -10,7 +10,7 @@ public struct AccountUser: Codable, Equatable, Sendable {
     public let avatarURL: String?
     public let memberNo: Int?
     public let bio: String?
-    /// 已绑定的登录 provider（"apple"/"google"）；旧网关响应无此字段 → nil
+    /// 已绑定的登录 provider（"apple"/"google"/"email"）；旧网关响应无此字段 → nil
     public let linkedProviders: [String]?
 
     public init(

@@ -3,6 +3,7 @@ import Foundation
 public enum AuthProvider: String, Sendable, CaseIterable {
     case apple
     case google
+    case email
 }
 
 /// provider 中立的登录凭证：AuthService 只管「拿到 idToken 之后」的事，
