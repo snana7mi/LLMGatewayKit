@@ -250,6 +250,10 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertTrue(sut.isLoggedIn)
         XCTAssertEqual(UserDefaults.standard.string(forKey: AuthService.Keys.cachedAppleSub), "sub-x")
+        let requestBody = try XCTUnwrap(URLProtocolStub.requestBodies.first ?? nil)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+        let nonce = try XCTUnwrap(json["nonce"] as? String)
+        XCTAssertFalse(nonce.isEmpty, "the raw Apple nonce must be forwarded for server-side token binding")
     }
 
     @MainActor

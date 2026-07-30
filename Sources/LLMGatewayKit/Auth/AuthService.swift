@@ -64,7 +64,7 @@ public final class AuthService {
         self.googleProvider = googleProvider
     }
 
-    public func authenticate(identityToken: Data, fullName: String?, appleSub: String) async throws {
+    public func authenticate(identityToken: Data, fullName: String?, appleSub: String, rawNonce: String? = nil) async throws {
         guard let tokenString = String(data: identityToken, encoding: .utf8) else {
             throw AuthError.invalidResponse
         }
@@ -83,6 +83,9 @@ public final class AuthService {
             "identityToken": tokenString,
             "deviceName": config.deviceName,
         ]
+        if let rawNonce {
+            body["nonce"] = rawNonce
+        }
         if let effectiveName, !effectiveName.isEmpty {
             body["displayName"] = effectiveName
         }
@@ -107,7 +110,11 @@ public final class AuthService {
     public func authenticateInteractively() async throws {
         let pair = NonceGenerator.makePair()
         let result = try await appleBridge.authenticate(nonceRaw: pair.raw, hashedNonce: pair.hashedSHA256)
-        try await authenticate(identityToken: Data(result.identityToken.utf8), fullName: result.fullName, appleSub: result.appleUserId)
+        try await authenticate(
+            identityToken: Data(result.identityToken.utf8),
+            fullName: result.fullName,
+            appleSub: result.appleUserId,
+            rawNonce: pair.raw)
     }
 
     /// provider 中立入口：apple 走既有路径（含 pendingDisplayName 重放），google 打 /auth/google。
@@ -117,7 +124,8 @@ public final class AuthService {
             try await authenticate(
                 identityToken: Data(credential.idToken.utf8),
                 fullName: credential.displayName,
-                appleSub: credential.providerUid)
+                appleSub: credential.providerUid,
+                rawNonce: credential.rawNonce)
         case .google:
             var body: [String: Any] = [
                 "idToken": credential.idToken,
