@@ -3,11 +3,11 @@ import LLMGatewayKit
 
 #if os(iOS)
 import GoogleSignIn
-import UIKit
 
-/// GoogleSignInProviding 的默认实现：写一次、所有 App 复用。
-/// GIDSignIn 自动读 App Info.plist 的 GIDClientID，本类 app 无关；
-/// App 侧只需：链接本 product + Info.plist 配置 + onOpenURL 转发 handle(_:) + 注入 AuthService。
+/// GoogleSignIn 8.x compatibility bridge.
+///
+/// Version 8 cannot bind an ID token to a caller-provided nonce, so `signIn()` fails
+/// closed. Apps must inject a nonce-capable `GoogleSignInProviding` implementation.
 @MainActor
 public final class GoogleSignInBridge: GoogleSignInProviding {
     public init() {}
@@ -18,32 +18,9 @@ public final class GoogleSignInBridge: GoogleSignInProviding {
     }
 
     public func signIn() async throws -> SignInCredential {
-        guard let presenter = Self.topViewController() else {
-            throw AuthError.serverError("No presenting view controller")
-        }
-        // GoogleSignIn 8.x 的 signIn API 无 nonce 参数（仅 7.1 短暂存在过）→ rawNonce 传 nil。
-        // 网关侧 nonce 校验本就是可选的；id_token 仍经 JWKS 验签 + aud/iss/exp 校验。
-        do {
-            let result = try await GIDSignIn.sharedInstance.signIn(
-                withPresenting: presenter, hint: nil, additionalScopes: nil)
-            guard let idToken = result.user.idToken?.tokenString,
-                  let uid = result.user.userID else {
-                throw AuthError.invalidResponse
-            }
-            return SignInCredential(provider: .google, idToken: idToken, providerUid: uid, displayName: nil, rawNonce: nil)
-        } catch let error as GIDSignInError where error.code == .canceled {
-            throw AuthError.userCancelled
-        }
-    }
-
-    private static func topViewController() -> UIViewController? {
-        let root = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first { $0.isKeyWindow }?.rootViewController
-        var top = root
-        while let presented = top?.presentedViewController { top = presented }
-        return top
+        // GoogleSignIn 8.x cannot bind its ID token to a caller-provided nonce. Do not
+        // silently downgrade replay protection; callers must inject a nonce-capable flow.
+        throw AuthError.googleNonceRequired
     }
 }
 #else

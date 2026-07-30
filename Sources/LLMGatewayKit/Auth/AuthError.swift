@@ -9,6 +9,7 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
     case serverError(String)
     case accountDeletionFailed
     case googleProviderUnavailable
+    case googleNonceRequired
     case identityAlreadyLinked
     case cannotUnlinkLastIdentity
     case userCancelled
@@ -31,6 +32,8 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
             return "Failed to delete account."
         case .googleProviderUnavailable:
             return "Google sign-in is not configured for this app."
+        case .googleNonceRequired:
+            return "Google sign-in requires a nonce-bound ID token."
         case .identityAlreadyLinked:
             return "This account is already linked to another user."
         case .cannotUnlinkLastIdentity:

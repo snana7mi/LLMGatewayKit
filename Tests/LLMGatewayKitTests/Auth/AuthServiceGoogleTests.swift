@@ -54,12 +54,31 @@ final class AuthServiceGoogleTests: XCTestCase {
     }
 
     @MainActor
+    func test_googleSignIn_withoutNonce_failsClosedWithoutRequest() async {
+        let sut = makeSUT(
+            responses: [],
+            google: MockGoogleSignInProviding(result: .success(.init(
+                provider: .google, idToken: "gid", providerUid: "g-sub")))
+        )
+
+        do {
+            try await sut.authenticateWithGoogleInteractively()
+            XCTFail("expected throw")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .googleNonceRequired)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertTrue(URLProtocolStub.requests.isEmpty)
+    }
+
+    @MainActor
     func test_linkGoogle_conflict409_mapsToIdentityAlreadyLinked() async throws {
         let store = InMemoryTokenStore()
         try store.save(accessToken: "acc", refreshToken: "ref", expiry: Date().addingTimeInterval(600))
         let sut = makeSUT(
             responses: [.success(body: #"{"error":"identity_already_linked"}"#, status: 409)],
-            google: MockGoogleSignInProviding(result: .success(.init(provider: .google, idToken: "gid", providerUid: "g-sub"))),
+            google: MockGoogleSignInProviding(result: .success(.init(provider: .google, idToken: "gid", providerUid: "g-sub", rawNonce: "raw-n"))),
             store: store
         )
         do {
@@ -68,6 +87,28 @@ final class AuthServiceGoogleTests: XCTestCase {
         } catch let error as AuthError {
             XCTAssertEqual(error, .identityAlreadyLinked)
         }
+    }
+
+    @MainActor
+    func test_linkGoogle_withoutNonce_failsClosedWithoutRequest() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "acc", refreshToken: "ref", expiry: Date().addingTimeInterval(600))
+        let sut = makeSUT(
+            responses: [],
+            google: MockGoogleSignInProviding(result: .success(.init(
+                provider: .google, idToken: "gid", providerUid: "g-sub"))),
+            store: store
+        )
+
+        do {
+            try await sut.linkGoogleAccount()
+            XCTFail("expected throw")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .googleNonceRequired)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertTrue(URLProtocolStub.requests.isEmpty)
     }
 
     @MainActor

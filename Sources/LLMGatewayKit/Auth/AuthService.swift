@@ -119,13 +119,14 @@ public final class AuthService {
                 fullName: credential.displayName,
                 appleSub: credential.providerUid)
         case .google:
+            guard let nonce = credential.rawNonce, !nonce.isEmpty else {
+                throw AuthError.googleNonceRequired
+            }
             var body: [String: Any] = [
                 "idToken": credential.idToken,
                 "deviceName": config.deviceName,
+                "nonce": nonce,
             ]
-            if let nonce = credential.rawNonce {
-                body["nonce"] = nonce
-            }
             let data = try await postJSON(path: "/auth/google", body: body)
             let parsed = try Self.parseTokenResponse(data)
             try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
@@ -149,13 +150,15 @@ public final class AuthService {
     public func linkGoogleAccount() async throws {
         guard let googleProvider else { throw AuthError.googleProviderUnavailable }
         let credential = try await googleProvider.signIn()
+        guard let nonce = credential.rawNonce, !nonce.isEmpty else {
+            throw AuthError.googleNonceRequired
+        }
         let token = try await validAccessToken()
         var request = URLRequest(url: try endpoint("/auth/link/google"))
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["idToken": credential.idToken]
-        if let nonce = credential.rawNonce { body["nonce"] = nonce }
+        let body: [String: Any] = ["idToken": credential.idToken, "nonce": nonce]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         _ = try await performLinkRequest(request)
         try? await fetchAccount()
