@@ -12,7 +12,7 @@ public struct SignInCredential: Equatable, Sendable {
     public let idToken: String
     public let providerUid: String      // apple sub / google sub
     public let displayName: String?     // Apple 首次授权才有；Google 传 nil（后端取 token claim）
-    public let rawNonce: String?        // 随登录请求上行，网关可选校验
+    public let rawNonce: String?        // Google 登录必填；随请求上行供网关校验 token nonce claim
 
     public init(provider: AuthProvider, idToken: String, providerUid: String, displayName: String? = nil, rawNonce: String? = nil) {
         self.provider = provider
