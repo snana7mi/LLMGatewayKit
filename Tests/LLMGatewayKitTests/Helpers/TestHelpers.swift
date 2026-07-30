@@ -10,7 +10,8 @@ enum TestConfig {
             companionAppNames: [],
             revenueCatAPIKey: nil,
             paywallFeatures: [],
-            deviceName: "Test Device"
+            deviceName: "Test Device",
+            appId: "test-app"
         )
     }
 }

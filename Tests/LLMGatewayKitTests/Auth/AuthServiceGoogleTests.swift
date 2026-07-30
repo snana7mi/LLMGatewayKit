@@ -38,6 +38,7 @@ final class AuthServiceGoogleTests: XCTestCase {
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(json["idToken"] as? String, "gid-token")
         XCTAssertEqual(json["nonce"] as? String, "raw-n")
+        XCTAssertEqual(json["appId"] as? String, "test-app")
     }
 
     @MainActor

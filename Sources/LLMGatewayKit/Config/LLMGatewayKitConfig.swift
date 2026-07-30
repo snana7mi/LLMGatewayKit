@@ -8,6 +8,7 @@ public struct LLMGatewayKitConfig: Sendable {
     public let revenueCatAPIKey: String?
     public let paywallFeatures: [PaywallFeature]
     public let deviceName: String
+    public let appId: String?
 
     public init(
         baseURL: URL,
@@ -16,7 +17,8 @@ public struct LLMGatewayKitConfig: Sendable {
         companionAppNames: [String],
         revenueCatAPIKey: String?,
         paywallFeatures: [PaywallFeature],
-        deviceName: String
+        deviceName: String,
+        appId: String? = nil
     ) {
         self.baseURL = baseURL
         self.entitlementID = entitlementID
@@ -25,6 +27,7 @@ public struct LLMGatewayKitConfig: Sendable {
         self.revenueCatAPIKey = revenueCatAPIKey
         self.paywallFeatures = paywallFeatures
         self.deviceName = deviceName
+        self.appId = appId
     }
 }
 

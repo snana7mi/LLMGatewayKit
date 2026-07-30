@@ -10,11 +10,13 @@ final class LLMGatewayKitConfigTests: XCTestCase {
             companionAppNames: ["ConchTalk"],
             revenueCatAPIKey: "key_abc",
             paywallFeatures: [.init(id: "f1", icon: "star", title: "Feature 1", subtitle: nil)],
-            deviceName: "TestDevice"
+            deviceName: "TestDevice",
+            appId: "snapkei"
         )
 
         XCTAssertEqual(config.entitlementID, "pro")
         XCTAssertEqual(config.companionAppNames, ["ConchTalk"])
         XCTAssertEqual(config.paywallFeatures.first?.title, "Feature 1")
+        XCTAssertEqual(config.appId, "snapkei")
     }
 }

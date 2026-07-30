@@ -73,16 +73,19 @@ public final class AuthService {
         // group) returns nil. So persist it the instant it arrives — BEFORE the fallible POST — and
         // replay it on later sign-ins until the gateway has a name. This way a transient failure on the
         // very first sign-in never loses the one-time name forever.
-        let incoming = fullName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let incoming, !incoming.isEmpty {
+        // Apple 的授权页允许用户手动修改姓名。先按 App 昵称规则规范化；无效姓名降级为
+        // nil，账号仍可注册，登录后由 App 的空昵称引导补填。
+        let incoming = AppleNameFormatter.sanitize(fullName)
+        if let incoming {
             savePendingDisplayName(incoming, appleSub: appleSub)
         }
-        let effectiveName = (incoming?.isEmpty == false ? incoming : nil) ?? pendingDisplayName(appleSub: appleSub)
+        let effectiveName = incoming ?? pendingDisplayName(appleSub: appleSub)
 
         var body: [String: Any] = [
             "identityToken": tokenString,
             "deviceName": config.deviceName,
         ]
+        if let appId = config.appId { body["appId"] = appId }
         if let effectiveName, !effectiveName.isEmpty {
             body["displayName"] = effectiveName
         }
@@ -123,6 +126,7 @@ public final class AuthService {
                 "idToken": credential.idToken,
                 "deviceName": config.deviceName,
             ]
+            if let appId = config.appId { body["appId"] = appId }
             if let nonce = credential.rawNonce {
                 body["nonce"] = nonce
             }
@@ -167,11 +171,13 @@ public final class AuthService {
         var request = URLRequest(url: try endpoint("/auth/email/verify"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
+        var body: [String: Any] = [
             "email": email,
             "code": code,
             "deviceName": config.deviceName,
-        ])
+        ]
+        if let appId = config.appId { body["appId"] = appId }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 15
 
         let data = try await performEmailRequest(request)
@@ -263,11 +269,15 @@ public final class AuthService {
     }
 
     /// 同 performJSON，但把关联/解绑的业务错误码映射为类型化 AuthError。
-    private func performLinkRequest(_ request: URLRequest) async throws -> Data {
+    private func performLinkRequest(_ request: URLRequest, isRetry: Bool = false) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw AuthError.networkError
+            }
+            if http.statusCode == 401,
+               let retry = try await authorizedRetryRequest(for: request, isRetry: isRetry) {
+                return try await performLinkRequest(retry, isRetry: true)
             }
             if http.statusCode == 409 {
                 throw AuthError.identityAlreadyLinked
@@ -293,11 +303,15 @@ public final class AuthService {
     }
 
     /// 邮箱端点错误映射：把 OTP、限频和占用错误转成类型化 AuthError。
-    private func performEmailRequest(_ request: URLRequest) async throws -> Data {
+    private func performEmailRequest(_ request: URLRequest, isRetry: Bool = false) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw AuthError.networkError
+            }
+            if http.statusCode == 401,
+               let retry = try await authorizedRetryRequest(for: request, isRetry: isRetry) {
+                return try await performEmailRequest(retry, isRetry: true)
             }
             if http.statusCode == 429 {
                 throw AuthError.emailRateLimited
@@ -524,9 +538,7 @@ public final class AuthService {
     }
 
     private func pendingDisplayName(appleSub: String) -> String? {
-        let value = defaults.string(forKey: pendingDisplayNameKey(appleSub))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (value?.isEmpty == false) ? value : nil
+        AppleNameFormatter.sanitize(defaults.string(forKey: pendingDisplayNameKey(appleSub)))
     }
 
     private func savePendingDisplayName(_ name: String, appleSub: String) {
@@ -566,7 +578,12 @@ public final class AuthService {
         var request = URLRequest(url: try endpoint("/auth/refresh"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["refreshToken": refresh, "deviceName": config.deviceName])
+        var body: [String: Any] = [
+            "refreshToken": refresh,
+            "deviceName": config.deviceName,
+        ]
+        if let appId = config.appId { body["appId"] = appId }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 15
 
         let data: Data
@@ -610,11 +627,15 @@ public final class AuthService {
         return try await performJSON(request)
     }
 
-    private func performJSON(_ request: URLRequest) async throws -> Data {
+    private func performJSON(_ request: URLRequest, isRetry: Bool = false) async throws -> Data {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw AuthError.networkError
+            }
+            if http.statusCode == 401,
+               let retry = try await authorizedRetryRequest(for: request, isRetry: isRetry) {
+                return try await performJSON(retry, isRetry: true)
             }
             guard (200...299).contains(http.statusCode) else {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -631,6 +652,17 @@ public final class AuthService {
         } catch {
             throw error
         }
+    }
+
+    /// 仅 Bearer 受保护接口可在 401 后刷新并重放一次；公开登录/验证码接口保持原错误语义。
+    private func authorizedRetryRequest(for request: URLRequest, isRetry: Bool) async throws -> URLRequest? {
+        guard request.value(forHTTPHeaderField: "Authorization") != nil else { return nil }
+        guard !isRetry else { throw AuthError.sessionExpired }
+        try await refreshAccessToken()
+        let token = try await validAccessToken()
+        var retry = request
+        retry.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return retry
     }
 
     private func endpoint(_ path: String) throws -> URL {

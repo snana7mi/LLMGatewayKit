@@ -111,6 +111,7 @@ final class AuthServiceEmailTests: XCTestCase {
         XCTAssertEqual(json["email"] as? String, "log@x.com")
         XCTAssertEqual(json["code"] as? String, "123456")
         XCTAssertEqual(json["deviceName"] as? String, "Test Device")
+        XCTAssertEqual(json["appId"] as? String, "test-app")
     }
 
     // MARK: - Email linking
@@ -135,6 +136,30 @@ final class AuthServiceEmailTests: XCTestCase {
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(json["email"] as? String, " Bind@X.com ")
         XCTAssertEqual(json["locale"] as? String, "zh-Hans")
+    }
+
+    @MainActor
+    func test_startLinkEmailCode_401_refreshesBearerAndRetries() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(600))
+        let sut = makeSUT(
+            responses: [
+                .success(body: #"{"error":"expired"}"#, status: 401),
+                .success(body: #"{"accessToken":"new","refreshToken":"ref2","expiresIn":900}"#, status: 200),
+                .success(body: #"{"sent":true}"#, status: 200),
+            ],
+            store: store
+        )
+
+        try await sut.startLinkEmailCode(email: "bind@x.com")
+
+        XCTAssertEqual(URLProtocolStub.requests.map(\.url?.path), [
+            "/auth/link/email/start", "/auth/refresh", "/auth/link/email/start",
+        ])
+        XCTAssertEqual(
+            URLProtocolStub.requests.last?.value(forHTTPHeaderField: "Authorization"),
+            "Bearer new"
+        )
     }
 
     @MainActor

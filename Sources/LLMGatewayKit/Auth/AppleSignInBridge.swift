@@ -66,7 +66,12 @@ extension AppleSignInBridge: ASAuthorizationControllerDelegate {
 
     public nonisolated func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
         Task { @MainActor in
-            continuation?.resume(throwing: error)
+            if let authorizationError = error as? ASAuthorizationError,
+               authorizationError.code == .canceled {
+                continuation?.resume(throwing: AuthError.userCancelled)
+            } else {
+                continuation?.resume(throwing: error)
+            }
             continuation = nil
         }
     }

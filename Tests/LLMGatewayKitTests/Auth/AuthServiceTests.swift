@@ -33,6 +33,9 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertEqual(token, "new")
         XCTAssertEqual(try store.loadAccessToken(), "new")
+        let body = try XCTUnwrap(URLProtocolStub.requestBodies.first ?? nil)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["appId"] as? String, "test-app")
     }
 
     // MARK: - Refresh resilience: only an authoritative 401 may destroy the session
@@ -208,6 +211,33 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertEqual(sut.currentUser?.tier, "paid")
         XCTAssertEqual(sut.currentUser?.avatarURL, "https://x")
+    }
+
+    @MainActor
+    func test_fetchAccount_401_refreshesBearerAndRetriesOnce() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(1000))
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"error":"expired"}"#, status: 401),
+            .success(body: #"{"accessToken":"new","refreshToken":"ref2","expiresIn":900}"#, status: 200),
+            .success(body: #"{"user":{"id":"u","tier":"paid"}}"#, status: 200),
+        ])
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        sut.restoreSession()
+
+        try await sut.fetchAccount()
+
+        XCTAssertEqual(URLProtocolStub.requests.map(\.url?.path), ["/account", "/auth/refresh", "/account"])
+        XCTAssertEqual(
+            URLProtocolStub.requests.last?.value(forHTTPHeaderField: "Authorization"),
+            "Bearer new"
+        )
+        XCTAssertEqual(sut.currentUser?.id, "u")
     }
 
     @MainActor
@@ -475,6 +505,29 @@ final class AuthServiceTests: XCTestCase {
 
         try await sut.authenticateInteractively()
 
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertNil(json["displayName"])
+    }
+
+    @MainActor
+    func test_authenticateInteractively_invalidEditedFullName_omitsDisplayNameAndStillSignsIn() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
+        let editedName = String(repeating: "浪", count: 25)
+        let bridge = MockAppleSignInBridge(result: .success(.init(
+            identityToken: "raw", appleUserId: "sub", fullName: editedName)))
+        let sut = AuthService(
+            config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge,
+            session: URLSession(configuration: URLProtocolStub.makeConfig()), defaults: defaults,
+            profileCache: AccountProfileCache(defaults: defaults))
+
+        try await sut.authenticateInteractively()
+
+        XCTAssertTrue(sut.isLoggedIn)
         let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
         let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
