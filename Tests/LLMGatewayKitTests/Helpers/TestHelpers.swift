@@ -20,6 +20,7 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     enum Response: Sendable {
         case success(body: String, status: Int)
         case failure(URLError)
+        case delayedSuccess(body: String, status: Int, nanoseconds: UInt64)
     }
 
     nonisolated(unsafe) static var responses: [Response] = []
@@ -58,6 +59,20 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
             client?.urlProtocolDidFinishLoading(self)
         case .failure(let error):
             client?.urlProtocol(self, didFailWithError: error)
+        case .delayedSuccess(let body, let status, let nanoseconds):
+            let requestURL = request.url!
+            let protocolClient = client
+            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(nanoseconds))) {
+                let http = HTTPURLResponse(
+                    url: requestURL,
+                    statusCode: status,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                protocolClient?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                protocolClient?.urlProtocol(self, didLoad: Data(body.utf8))
+                protocolClient?.urlProtocolDidFinishLoading(self)
+            }
         }
     }
 

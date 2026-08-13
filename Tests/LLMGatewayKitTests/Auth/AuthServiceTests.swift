@@ -2,6 +2,11 @@ import XCTest
 @testable import LLMGatewayKit
 
 final class AuthServiceTests: XCTestCase {
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: AuthService.Keys.explicitLogout)
+        super.tearDown()
+    }
+
     @MainActor
     func test_authenticate_storesTokensAndUser() async throws {
         URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"acc","refreshToken":"ref","user":{"id":"u","tier":"paid","displayName":"D","email":"e@x"}}"#, status: 200)])
@@ -22,6 +27,44 @@ final class AuthServiceTests: XCTestCase {
     }
 
     @MainActor
+    func test_logoutDuringLogin_preventsDelayedLoginResponseFromRestoringSession() async throws {
+        let store = InMemoryTokenStore()
+        URLProtocolStub.reset(responses: [
+            .delayedSuccess(
+                body: #"{"accessToken":"late","refreshToken":"late-ref","user":{"id":"old","tier":"free"}}"#,
+                status: 200,
+                nanoseconds: 50_000_000
+            ),
+        ])
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+
+        let login = Task {
+            try await sut.authenticate(
+                identityToken: Data("token".utf8),
+                fullName: nil,
+                appleSub: "old-sub"
+            )
+        }
+        while URLProtocolStub.requests.isEmpty { await Task.yield() }
+        await sut.logout()
+
+        do {
+            try await login.value
+            XCTFail("stale login should be invalidated")
+        } catch AuthError.networkError {
+            // expected
+        }
+        XCTAssertFalse(sut.isLoggedIn)
+        XCTAssertNil(try store.loadAccessToken())
+        XCTAssertNil(sut.currentUser)
+    }
+
+    @MainActor
     func test_validAccessToken_refreshesWhenNearExpiry() async throws {
         let store = InMemoryTokenStore()
         try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
@@ -36,6 +79,8 @@ final class AuthServiceTests: XCTestCase {
         let body = try XCTUnwrap(URLProtocolStub.requestBodies.first ?? nil)
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(json["appId"] as? String, "test-app")
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(json["refreshRequestId"] as? String)))
+        XCTAssertNil(try store.loadRefreshRequestID())
     }
 
     // MARK: - Refresh resilience: only an authoritative 401 may destroy the session
@@ -63,6 +108,78 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertTrue(sut.isLoggedIn, "a network blip during refresh must NOT log the user out")
         XCTAssertEqual(try store.loadAccessToken(), "old")
         XCTAssertEqual(try store.loadRefreshToken(), "ref")
+    }
+
+    @MainActor
+    func test_refresh_retry_reusesPersistedRequestIDUntilTokensAreSaved() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
+        URLProtocolStub.reset(responses: [
+            .failure(URLError(.timedOut)),
+            .success(body: #"{"accessToken":"new","refreshToken":"ref2"}"#, status: 200),
+        ])
+        var sut: AuthService? = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        sut?.restoreSession()
+
+        do {
+            _ = try await sut?.validAccessToken()
+            XCTFail("expected first refresh to time out")
+        } catch AuthError.networkError {
+            // The request id must remain persisted for an exact server-side retry.
+        }
+        let pending = try XCTUnwrap(try store.loadRefreshRequestID())
+
+        // Model the real failure: iOS suspended/terminated the first service after the
+        // server committed, then a later process launch rebuilt it from durable storage.
+        sut = nil
+        let relaunched = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        relaunched.restoreSession()
+        let token = try await relaunched.validAccessToken()
+
+        XCTAssertEqual(token, "new")
+        let bodies = try URLProtocolStub.requestBodies.map { data -> [String: Any] in
+            try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try XCTUnwrap(data)) as? [String: Any]
+            )
+        }
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies[0]["refreshRequestId"] as? String, pending)
+        XCTAssertEqual(bodies[1]["refreshRequestId"] as? String, pending)
+        XCTAssertNil(try store.loadRefreshRequestID())
+    }
+
+    @MainActor
+    func test_refresh_legacyCustomStoreOmitsUnrecoverableRequestID() async throws {
+        let store = LegacyTokenStore(
+            access: "old",
+            refresh: "ref",
+            expiry: Date().addingTimeInterval(30)
+        )
+        URLProtocolStub.reset(responses: [
+            .success(body: #"{"accessToken":"new","refreshToken":"ref2"}"#, status: 200),
+        ])
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+
+        _ = try await sut.validAccessToken()
+
+        let body = try XCTUnwrap(URLProtocolStub.requestBodies.first ?? nil)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(json["refreshRequestId"])
     }
 
     @MainActor
@@ -109,6 +226,32 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertFalse(sut.isLoggedIn, "an authoritative 401 must log the user out")
         XCTAssertNil(try store.loadRefreshToken())
+        XCTAssertNil(try store.loadRefreshRequestID())
+    }
+
+    @MainActor
+    func test_refresh_403_preservesSessionAsTransientInfrastructureFailure() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "old", refreshToken: "ref", expiry: Date().addingTimeInterval(30))
+        URLProtocolStub.reset(responses: [.success(body: #"{"error":"forbidden"}"#, status: 403)])
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        sut.restoreSession()
+
+        do {
+            _ = try await sut.validAccessToken()
+            XCTFail("expected 403 to remain retryable")
+        } catch AuthError.networkError {
+            // A gateway/WAF 403 is not the refresh protocol's authoritative revocation signal.
+        } catch {
+            XCTFail("expected networkError, got \(error)")
+        }
+        XCTAssertTrue(sut.isLoggedIn)
+        XCTAssertEqual(try store.loadRefreshToken(), "ref")
     }
 
     @MainActor
@@ -187,6 +330,39 @@ final class AuthServiceTests: XCTestCase {
     }
 
     @MainActor
+    func test_logoutTombstone_preventsResidualKeychainTokensFromRevivingSession() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("sub", forKey: AuthService.Keys.lastLoginProviderUid)
+        let store = UnclearableTokenStore(
+            access: "old-access",
+            refresh: "old-refresh",
+            expiry: Date().addingTimeInterval(3600)
+        )
+        let makeService = {
+            AuthService(
+                config: TestConfig.make(),
+                tokenStore: store,
+                appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+                session: URLSession(configuration: URLProtocolStub.makeConfig()),
+                defaults: defaults,
+                profileCache: AccountProfileCache(defaults: defaults)
+            )
+        }
+        let sut = makeService()
+        sut.restoreSession()
+        XCTAssertTrue(sut.isLoggedIn)
+
+        await sut.logout()
+        let relaunched = makeService()
+        relaunched.restoreSession()
+
+        XCTAssertFalse(relaunched.isLoggedIn)
+        XCTAssertEqual(store.loadRefreshToken(), "old-refresh")
+    }
+
+    @MainActor
     func test_deleteAccount_callsEndpointAndLogsOut() async throws {
         let store = InMemoryTokenStore()
         try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
@@ -211,6 +387,54 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertEqual(sut.currentUser?.tier, "paid")
         XCTAssertEqual(sut.currentUser?.avatarURL, "https://x")
+    }
+
+    @MainActor
+    func test_fetchAccount_doesNotLetOldAccountResponseOverwriteNewLogin() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(
+            accessToken: "old-access",
+            refreshToken: "old-refresh",
+            expiry: Date().addingTimeInterval(1000)
+        )
+        URLProtocolStub.reset(responses: [
+            .delayedSuccess(
+                body: #"{"user":{"id":"old","tier":"free"}}"#,
+                status: 200,
+                nanoseconds: 50_000_000
+            ),
+            .success(
+                body: #"{"accessToken":"new-access","refreshToken":"new-refresh","user":{"id":"new","tier":"paid"}}"#,
+                status: 200
+            ),
+            .success(body: #"{"user":{"id":"new","tier":"paid"}}"#, status: 200),
+        ])
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        sut.restoreSession()
+
+        let staleFetch = Task { try await sut.fetchAccount() }
+        while URLProtocolStub.requests.isEmpty { await Task.yield() }
+        await sut.logout()
+        try await sut.authenticate(
+            identityToken: Data("new-identity".utf8),
+            fullName: nil,
+            appleSub: "new-sub"
+        )
+
+        do {
+            try await staleFetch.value
+            XCTFail("stale profile response should be invalidated")
+        } catch AuthError.networkError {
+            // expected: the old account response must not mutate the new session
+        }
+        XCTAssertTrue(sut.isLoggedIn)
+        XCTAssertEqual(sut.currentUser?.id, "new")
+        XCTAssertEqual(try store.loadAccessToken(), "new-access")
     }
 
     @MainActor
@@ -646,4 +870,48 @@ private final class ThrowingTokenStore: TokenStoring, @unchecked Sendable {
     func loadRefreshToken() throws -> String? { throw AuthError.serverError("Keychain read -25308") }
     func loadExpiry() throws -> Date? { throw AuthError.serverError("Keychain read -25308") }
     func clear() throws {}
+}
+
+private final class LegacyTokenStore: TokenStoring, @unchecked Sendable {
+    private var access: String?
+    private var refresh: String?
+    private var expiry: Date?
+
+    init(access: String, refresh: String, expiry: Date) {
+        self.access = access
+        self.refresh = refresh
+        self.expiry = expiry
+    }
+
+    func save(accessToken: String, refreshToken: String, expiry: Date) {
+        access = accessToken
+        refresh = refreshToken
+        self.expiry = expiry
+    }
+    func loadAccessToken() -> String? { access }
+    func loadRefreshToken() -> String? { refresh }
+    func loadExpiry() -> Date? { expiry }
+    func clear() {
+        access = nil
+        refresh = nil
+        expiry = nil
+    }
+}
+
+private final class UnclearableTokenStore: TokenStoring, @unchecked Sendable {
+    private let access: String
+    private let refresh: String
+    private let expiry: Date
+
+    init(access: String, refresh: String, expiry: Date) {
+        self.access = access
+        self.refresh = refresh
+        self.expiry = expiry
+    }
+
+    func save(accessToken: String, refreshToken: String, expiry: Date) {}
+    func loadAccessToken() -> String? { access }
+    func loadRefreshToken() -> String? { refresh }
+    func loadExpiry() -> Date? { expiry }
+    func clear() throws { throw AuthError.serverError("Keychain delete -25308") }
 }

@@ -14,9 +14,21 @@ final class KeychainTokenStoreTests: XCTestCase {
     func test_clear() throws {
         let store = InMemoryTokenStore()
         try store.save(accessToken: "A", refreshToken: "R", expiry: Date())
+        try store.saveRefreshRequestID("attempt")
         try store.clear()
 
         XCTAssertNil(try store.loadAccessToken())
+        XCTAssertNil(try store.loadRefreshRequestID())
+    }
+
+    func test_refreshRequestIDRoundTrip() throws {
+        let store = InMemoryTokenStore()
+
+        try store.saveRefreshRequestID("attempt")
+
+        XCTAssertEqual(try store.loadRefreshRequestID(), "attempt")
+        try store.clearRefreshRequestID()
+        XCTAssertNil(try store.loadRefreshRequestID())
     }
 }
 

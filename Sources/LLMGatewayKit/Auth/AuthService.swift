@@ -18,6 +18,9 @@ public final class AuthService {
         public static let migrationDone = "LLMGatewayKit.migrationDone"
         /// provider 中立的「曾成功登录」标记（Apple/Google 都写）：锁屏冷启乐观保留登录态用
         public static let lastLoginProviderUid = "LLMGatewayKit.lastLoginProviderUid"
+        /// Prevents residual Keychain data from reviving a session when secure deletion
+        /// was temporarily unavailable during an explicit/authoritative logout.
+        public static let explicitLogout = "LLMGatewayKit.explicitLogout"
     }
 
     private let config: LLMGatewayKitConfig
@@ -28,6 +31,8 @@ public final class AuthService {
     private let defaults: UserDefaults
     private let profileCache: AccountProfileCache
     private var refreshTask: Task<String, Error>?
+    /// Invalidates any refresh that was started before logout or a new credential login.
+    private var credentialGeneration: UInt64 = 0
     private var cachedAvatarURL: String?
 
     public init(
@@ -65,6 +70,8 @@ public final class AuthService {
     }
 
     public func authenticate(identityToken: Data, fullName: String?, appleSub: String) async throws {
+        invalidateInFlightRefresh()
+        let expectedGeneration = credentialGeneration
         guard let tokenString = String(data: identityToken, encoding: .utf8) else {
             throw AuthError.invalidResponse
         }
@@ -92,14 +99,17 @@ public final class AuthService {
 
         let data = try await postJSON(path: "/auth/apple", body: body)
         let parsed = try Self.parseTokenResponse(data)
+        guard credentialGeneration == expectedGeneration else { throw AuthError.networkError }
         try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
+        try? tokenStore.clearRefreshRequestID()
+        defaults.removeObject(forKey: Keys.explicitLogout)
         isLoggedIn = true
         if let parsedUser = parsed.user {
             setCurrentUser(parsedUser)
         }
         defaults.set(appleSub, forKey: Keys.cachedAppleSub)
         defaults.set(appleSub, forKey: Keys.lastLoginProviderUid)
-        try? await fetchAccount()
+        try? await fetchAccount(expectedGeneration: expectedGeneration)
         // Server now has a name (the one we just sent, or one already stored by a sibling app) →
         // stop replaying. Until confirmed, the pending name survives for the next sign-in attempt.
         if let name = currentUser?.displayName, !name.isEmpty {
@@ -122,6 +132,8 @@ public final class AuthService {
                 fullName: credential.displayName,
                 appleSub: credential.providerUid)
         case .google:
+            invalidateInFlightRefresh()
+            let expectedGeneration = credentialGeneration
             var body: [String: Any] = [
                 "idToken": credential.idToken,
                 "deviceName": config.deviceName,
@@ -132,13 +144,16 @@ public final class AuthService {
             }
             let data = try await postJSON(path: "/auth/google", body: body)
             let parsed = try Self.parseTokenResponse(data)
+            guard credentialGeneration == expectedGeneration else { throw AuthError.networkError }
             try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
+            try? tokenStore.clearRefreshRequestID()
+            defaults.removeObject(forKey: Keys.explicitLogout)
             isLoggedIn = true
             if let parsedUser = parsed.user {
                 setCurrentUser(parsedUser)
             }
             defaults.set(credential.providerUid, forKey: Keys.lastLoginProviderUid)
-            try? await fetchAccount()
+            try? await fetchAccount(expectedGeneration: expectedGeneration)
         case .email:
             // 邮箱登录是 start → verify 两步流程，不接受一阶段 SignInCredential。
             throw AuthError.invalidResponse
@@ -168,6 +183,8 @@ public final class AuthService {
 
     /// 校验验证码并完成登录/注册；成功后保存 token 并刷新账户资料。
     public func signInWithEmailCode(email: String, code: String) async throws {
+        invalidateInFlightRefresh()
+        let expectedGeneration = credentialGeneration
         var request = URLRequest(url: try endpoint("/auth/email/verify"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -182,17 +199,20 @@ public final class AuthService {
 
         let data = try await performEmailRequest(request)
         let parsed = try Self.parseTokenResponse(data)
+        guard credentialGeneration == expectedGeneration else { throw AuthError.networkError }
         try tokenStore.save(
             accessToken: parsed.accessToken,
             refreshToken: parsed.refreshToken,
             expiry: parsed.expiry
         )
+        try? tokenStore.clearRefreshRequestID()
+        defaults.removeObject(forKey: Keys.explicitLogout)
         isLoggedIn = true
         if let parsedUser = parsed.user {
             setCurrentUser(parsedUser)
         }
         defaults.set(email, forKey: Keys.lastLoginProviderUid)
-        try? await fetchAccount()
+        try? await fetchAccount(expectedGeneration: expectedGeneration)
     }
 
     /// 请求绑定/改绑邮箱验证码；邮箱已属于其他账号时映射为 identityAlreadyLinked。
@@ -351,6 +371,12 @@ public final class AuthService {
     }
 
     public func restoreSession() {
+        if defaults.bool(forKey: Keys.explicitLogout) {
+            // Best-effort retry in case the original Keychain deletion failed while locked.
+            try? tokenStore.clear()
+            isLoggedIn = false
+            return
+        }
         do {
             let access = try tokenStore.loadAccessToken()
             let refresh = try tokenStore.loadRefreshToken()
@@ -388,19 +414,26 @@ public final class AuthService {
             return
         }
 
-        let task = Task { try await self.performRefresh() }
+        let generation = credentialGeneration
+        let task = Task { try await self.performRefresh(expectedGeneration: generation) }
         refreshTask = task
         do {
             _ = try await task.value
-            refreshTask = nil
+            if credentialGeneration == generation {
+                refreshTask = nil
+            }
         } catch {
-            refreshTask = nil
+            if credentialGeneration == generation {
+                refreshTask = nil
+            }
             throw error
         }
     }
 
     public func logout() async {
+        invalidateInFlightRefresh()
         let userID = currentUser?.id
+        defaults.set(true, forKey: Keys.explicitLogout)
         try? tokenStore.clear()
         isLoggedIn = false
         currentUser = nil
@@ -421,11 +454,18 @@ public final class AuthService {
     }
 
     public func fetchAccount() async throws {
+        try await fetchAccount(expectedGeneration: credentialGeneration)
+    }
+
+    private func fetchAccount(expectedGeneration: UInt64) async throws {
         let token = try await validAccessToken()
         var request = URLRequest(url: try endpoint("/account"))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let data = try await performJSON(request)
         let payload = try JSONDecoder.gateway.decode(AccountPayload.self, from: data)
+        if credentialGeneration != expectedGeneration {
+            throw AuthError.networkError
+        }
         setCurrentUser(payload.user)
     }
 
@@ -559,8 +599,8 @@ public final class AuthService {
         }
     }
 
-    private func performRefresh() async throws -> String {
-        // 凭据销毁的唯一合法时机：服务端权威拒绝 refresh token(401/403)。
+    private func performRefresh(expectedGeneration: UInt64) async throws -> String {
+        // 凭据销毁的唯一合法时机：服务端权威拒绝 refresh token(401)。
         // 一切临时失败(网络抖动、5xx、解析失败、Keychain 读/写失败)都必须保留会话、抛可重试错误，
         // 否则用户会因为弱网/服务端抖动/锁屏而被反复登出、反复弹登录。
         let storedRefresh: String?
@@ -575,6 +615,23 @@ public final class AuthService {
             throw AuthError.notLoggedIn
         }
 
+        var refreshRequestID: String?
+        if tokenStore.supportsPersistentRefreshRequestID {
+            do {
+                if let pending = try tokenStore.loadRefreshRequestID(), UUID(uuidString: pending) != nil {
+                    refreshRequestID = pending
+                } else {
+                    let created = UUID().uuidString
+                    try tokenStore.saveRefreshRequestID(created)
+                    refreshRequestID = created
+                }
+            } catch {
+                // If the id cannot be persisted, sending a one-off id would make a lost response
+                // unrecoverable again. Preserve credentials and retry when secure storage is available.
+                throw AuthError.networkError
+            }
+        }
+
         var request = URLRequest(url: try endpoint("/auth/refresh"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -582,6 +639,7 @@ public final class AuthService {
             "refreshToken": refresh,
             "deviceName": config.deviceName,
         ]
+        if let refreshRequestID { body["refreshRequestId"] = refreshRequestID }
         if let appId = config.appId { body["appId"] = appId }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 15
@@ -599,8 +657,12 @@ public final class AuthService {
             throw AuthError.networkError       // 网络抖动/超时：临时，保留会话
         }
 
-        if statusCode == 401 || statusCode == 403 {
+        if statusCode == 401 {
             // 权威拒绝：refresh token 真的被吊销/过期 → 销毁凭据并要求重新登录。
+            guard credentialGeneration == expectedGeneration,
+                  (try? tokenStore.loadRefreshToken()) == refresh else {
+                throw AuthError.networkError
+            }
             await logout()
             throw AuthError.sessionExpired
         }
@@ -610,12 +672,23 @@ public final class AuthService {
 
         do {
             let parsed = try Self.parseTokenResponse(data)
+            guard credentialGeneration == expectedGeneration,
+                  (try? tokenStore.loadRefreshToken()) == refresh else {
+                throw AuthError.networkError
+            }
             try tokenStore.save(accessToken: parsed.accessToken, refreshToken: parsed.refreshToken, expiry: parsed.expiry)
+            try? tokenStore.clearRefreshRequestID()
             return parsed.accessToken
         } catch {
             // 解析失败(响应被截断/格式漂移) 或 Keychain 写失败：临时问题，别销毁凭据。
             throw AuthError.networkError
         }
+    }
+
+    private func invalidateInFlightRefresh() {
+        credentialGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
     }
 
     private func postJSON(path: String, body: [String: Any]) async throws -> Data {
