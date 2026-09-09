@@ -17,6 +17,9 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
     case emailTooManyAttempts
     case invalidEmail
     case emailRateLimited
+    case blockedDisplayName
+    case blockedAvatar
+    case profileCheckUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -52,6 +55,12 @@ public enum AuthError: Equatable, LocalizedError, Sendable {
             return "Please enter a valid email address."
         case .emailRateLimited:
             return "Too many requests. Please wait a bit and try again."
+        case .blockedDisplayName:
+            return "This nickname isn't allowed. Please choose another."
+        case .blockedAvatar:
+            return "This photo can't be used as an avatar. Please choose another."
+        case .profileCheckUnavailable:
+            return "We couldn't check this photo right now. Please try again."
         }
     }
 }

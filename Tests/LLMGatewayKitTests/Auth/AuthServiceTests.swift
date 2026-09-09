@@ -674,6 +674,49 @@ final class AuthServiceTests: XCTestCase {
     }
 
     @MainActor
+    func test_updateDisplayName_mapsBlockedName() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"error":"blocked_display_name"}"#, status: 400)])
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(3600))
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .success(.init(identityToken: "t", appleUserId: "sub"))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+
+        do {
+            try await sut.updateDisplayName("blocked")
+            XCTFail("expected blockedDisplayName")
+        } catch AuthError.blockedDisplayName {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    @MainActor
+    func test_uploadAvatar_mapsBlockedAvatar() async throws {
+        URLProtocolStub.reset(responses: [.success(body: #"{"error":"blocked_avatar"}"#, status: 400)])
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(3600))
+        let sut = AuthService(
+            config: TestConfig.make(),
+            tokenStore: store,
+            appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))),
+            session: URLSession(configuration: URLProtocolStub.makeConfig())
+        )
+        sut.restoreSession()
+
+        do {
+            _ = try await sut.uploadAvatar(imageData: Data([0xFF, 0xD8]), mimeType: "image/jpeg")
+            XCTFail("expected blockedAvatar")
+        } catch AuthError.blockedAvatar {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    @MainActor
     func test_updateBio_patchesAndUpdatesCurrentUser() async throws {
         URLProtocolStub.reset(responses: [.success(body: #"{"user":{"id":"u","tier":"free","displayName":"New","memberNo":7,"bio":"hi"}}"#, status: 200)])
         let store = InMemoryTokenStore()

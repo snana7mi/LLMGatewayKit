@@ -713,7 +713,7 @@ public final class AuthService {
             guard (200...299).contains(http.statusCode) else {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let message = json["error"] as? String ?? json["message"] as? String {
-                    throw AuthError.serverError(message)
+                    throw Self.mapServerError(message)
                 }
                 throw AuthError.serverError("HTTP \(http.statusCode)")
             }
@@ -736,6 +736,15 @@ public final class AuthService {
         var retry = request
         retry.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return retry
+    }
+
+    private static func mapServerError(_ message: String) -> AuthError {
+        switch message {
+        case "blocked_display_name": return .blockedDisplayName
+        case "blocked_avatar": return .blockedAvatar
+        case "avatar_check_unavailable": return .profileCheckUnavailable
+        default: return .serverError(message)
+        }
     }
 
     private func endpoint(_ path: String) throws -> URL {
