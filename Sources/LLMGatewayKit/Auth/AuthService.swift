@@ -494,6 +494,17 @@ public final class AuthService {
         setCurrentUser(payload.user)
     }
 
+    /// 网关为当前账号发放的 RevenueCat app user id（不透明、只发给本人）。
+    /// 购买/恢复前用它 `Purchases.logIn`，webhook 才能把商店事件对回这个账号。
+    public func fetchRevenueCatAppUserID() async throws -> String {
+        let token = try await validAccessToken()
+        var request = URLRequest(url: try endpoint("/account/revenuecat-app-user-id"))
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let data = try await performJSON(request)
+        struct Payload: Decodable { let appUserId: String }
+        return try JSONDecoder().decode(Payload.self, from: data).appUserId
+    }
+
     public func fetchUsage() async throws -> UsageInfo {
         let token = try await validAccessToken()
         var request = URLRequest(url: try endpoint("/usage"))
