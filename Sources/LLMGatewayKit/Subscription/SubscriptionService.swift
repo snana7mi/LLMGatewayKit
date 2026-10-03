@@ -39,7 +39,11 @@ public struct LivePurchaseClient: PurchaseClient {
         guard let current = offerings.current else { return nil }
         return PurchaseOffering(
             packages: current.availablePackages.map {
-                PurchasePackage(id: $0.identifier, localizedPrice: $0.storeProduct.localizedPriceString)
+                PurchasePackage(
+                    id: $0.identifier,
+                    localizedPrice: $0.storeProduct.localizedPriceString,
+                    billingPeriod: $0.storeProduct.subscriptionPeriod.flatMap(Self.billingPeriod)
+                )
             }
         )
         #else
@@ -98,6 +102,18 @@ public struct LivePurchaseClient: PurchaseClient {
     }
 
     #if canImport(RevenueCat)
+    private static func billingPeriod(_ period: SubscriptionPeriod) -> PurchaseBillingPeriod? {
+        let unit: PurchaseBillingPeriod.Unit
+        switch period.unit {
+        case .day: unit = .day
+        case .week: unit = .week
+        case .month: unit = .month
+        case .year: unit = .year
+        @unknown default: return nil
+        }
+        return PurchaseBillingPeriod(value: period.value, unit: unit)
+    }
+
     private func findPackage(id: String) async throws -> Package? {
         let offerings = try await Purchases.shared.offerings()
         return offerings.current?.availablePackages.first { $0.identifier == id }
@@ -139,6 +155,8 @@ public final class SubscriptionService {
     public typealias AppUserIDProvider = @MainActor @Sendable () async throws -> String
 
     public private(set) var displayPrice: String?
+    /// 与 `displayPrice` 同一个商品的扣费周期；取不到商品时同样为 nil。
+    public private(set) var displayBillingPeriod: PurchaseBillingPeriod?
     public private(set) var purchaseState: PurchaseState = .idle
 
     private let authService: AuthService
@@ -184,9 +202,12 @@ public final class SubscriptionService {
             if appUserIDProvider != nil, authService.isLoggedIn {
                 try await identifyPurchaser()
             }
-            displayPrice = try await client.currentOffering()?.packages.first?.localizedPrice
+            let package = try await client.currentOffering()?.packages.first
+            displayPrice = package?.localizedPrice
+            displayBillingPeriod = package?.billingPeriod
         } catch {
             displayPrice = nil
+            displayBillingPeriod = nil
         }
     }
 
