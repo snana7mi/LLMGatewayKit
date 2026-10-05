@@ -45,6 +45,20 @@ public struct PaywallView: View {
 
                 Spacer(minLength: 0)
 
+                if let price = viewModel.displayPrice, !price.isEmpty {
+                    VStack(spacing: 4) {
+                        Text(price)
+                            .font(.largeTitle.bold())
+                        if let period = viewModel.displayBillingPeriod {
+                            Text(periodCaption(period))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .accessibilityElement(children: .combine)
+                }
+
                 VStack(spacing: 12) {
                     Button {
                         Task { await viewModel.purchase() }
@@ -93,6 +107,20 @@ public struct PaywallView: View {
             return "有効化しました"
         case .idle, .failed:
             return viewModel.displayPrice.map { "Pro にアップグレード \($0)" } ?? "Pro にアップグレード"
+        }
+    }
+
+    /// 金额来自商店；这里只把周期说成日语，与本页其余文案一致。
+    private func periodCaption(_ period: PurchaseBillingPeriod) -> String {
+        switch (period.unit, period.value) {
+        case (.day, 1): return "1日あたり"
+        case (.week, 1): return "毎週"
+        case (.month, 1): return "毎月"
+        case (.year, 1): return "毎年"
+        case (.day, let count): return "\(count)日ごと"
+        case (.week, let count): return "\(count)週間ごと"
+        case (.month, let count): return "\(count)か月ごと"
+        case (.year, let count): return "\(count)年ごと"
         }
     }
 }

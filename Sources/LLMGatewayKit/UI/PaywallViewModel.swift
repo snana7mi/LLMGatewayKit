@@ -4,6 +4,7 @@ import Observation
 @Observable
 public final class PaywallViewModel {
     public private(set) var displayPrice: String?
+    public private(set) var displayBillingPeriod: PurchaseBillingPeriod?
     public private(set) var purchaseState: PurchaseState = .idle
 
     private let subscriptionService: SubscriptionService
@@ -11,6 +12,7 @@ public final class PaywallViewModel {
     public init(subscriptionService: SubscriptionService) {
         self.subscriptionService = subscriptionService
         self.displayPrice = subscriptionService.displayPrice
+        self.displayBillingPeriod = subscriptionService.displayBillingPeriod
         self.purchaseState = subscriptionService.purchaseState
     }
 
@@ -31,6 +33,7 @@ public final class PaywallViewModel {
 
     private func refresh() {
         displayPrice = subscriptionService.displayPrice
+        displayBillingPeriod = subscriptionService.displayBillingPeriod
         purchaseState = subscriptionService.purchaseState
     }
 }
