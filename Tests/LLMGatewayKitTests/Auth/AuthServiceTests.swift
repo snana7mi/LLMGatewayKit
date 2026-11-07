@@ -494,6 +494,20 @@ final class AuthServiceTests: XCTestCase {
     }
 
     @MainActor
+    func test_uploadAvatar_keepsProStoreBacked() async throws {
+        let store = InMemoryTokenStore()
+        try store.save(accessToken: "a", refreshToken: "r", expiry: Date().addingTimeInterval(1000))
+        URLProtocolStub.reset(responses: [.success(body: #"{"avatarURL":"https://avatars.x/u.jpg"}"#, status: 200)])
+        let sut = AuthService(config: TestConfig.make(), tokenStore: store, appleBridge: MockAppleSignInBridge(result: .failure(URLError(.unknown))), session: URLSession(configuration: URLProtocolStub.makeConfig()))
+        sut.restoreSession()
+        sut.updateCurrentUser(.init(id: "u", email: nil, displayName: nil, tier: "paid", tierExpiresAt: nil, createdAt: nil, avatarURL: nil, proStoreBacked: false))
+
+        _ = try await sut.uploadAvatar(imageData: Data([0xFF, 0xD8]), mimeType: "image/jpeg")
+
+        XCTAssertEqual(sut.currentUser?.proStoreBacked, false)
+    }
+
+    @MainActor
     func test_authenticateInteractively_callsBridgeAndAuthenticate() async throws {
         URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
         let store = InMemoryTokenStore()

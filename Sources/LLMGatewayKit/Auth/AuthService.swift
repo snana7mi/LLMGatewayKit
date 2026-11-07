@@ -551,7 +551,8 @@ public final class AuthService {
                 avatarURL: avatarURL,
                 memberNo: user.memberNo,
                 bio: user.bio,
-                linkedProviders: user.linkedProviders
+                linkedProviders: user.linkedProviders,
+                proStoreBacked: user.proStoreBacked
             ))
         }
         cachedAvatarData = imageData
