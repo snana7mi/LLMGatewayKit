@@ -762,6 +762,29 @@ final class AuthServiceTests: XCTestCase {
     }
 
     @MainActor
+    func test_authenticateInteractively_forwardsRawNonceForServerSideBinding() async throws {
+        let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        URLProtocolStub.reset(responses: [.success(body: #"{"accessToken":"a","refreshToken":"r","user":{"id":"u","tier":"free"}}"#, status: 200)])
+        let bridge = MockAppleSignInBridge(result: .success(.init(identityToken: "raw", appleUserId: "sub", fullName: nil)))
+        let sut = AuthService(config: TestConfig.make(), tokenStore: InMemoryTokenStore(), appleBridge: bridge, session: URLSession(configuration: URLProtocolStub.makeConfig()), defaults: defaults, profileCache: AccountProfileCache(defaults: defaults))
+
+        try await sut.authenticateInteractively()
+
+        let idx = try XCTUnwrap(URLProtocolStub.requests.firstIndex(where: { $0.url?.path.hasSuffix("/auth/apple") == true }))
+        let bodyData = try XCTUnwrap(URLProtocolStub.requestBodies[idx])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+
+        // 网关侧 `if (rawNonce)` 才校验：不给就完全不校验 nonce，id_token 被截获即可重放。
+        let sentNonce = try XCTUnwrap(json["nonce"] as? String, "raw nonce must be forwarded to /auth/apple")
+        XCTAssertFalse(sentNonce.isEmpty)
+        // 送去网关的 raw 必须与交给 Apple 的 hashedNonce 是同一对，否则网关 SHA-256 后对不上。
+        XCTAssertEqual(NonceGenerator.sha256(sentNonce), bridge.captured.hashed)
+        XCTAssertEqual(sentNonce, bridge.captured.raw)
+    }
+
+    @MainActor
     func test_authenticateInteractively_nilFullName_omitsDisplayName() async throws {
         let suiteName = "LLMGatewayKitTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -98,13 +98,21 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 
 final class MockAppleSignInBridge: AppleSignInAuthenticating, @unchecked Sendable {
     let result: Result<AppleSignInResult, Error>
+    /// 最近一次调用收到的 (raw, hashed)。用来断言送给网关的 raw 与交给 Apple 的哈希是同一对。
+    final class Captured: @unchecked Sendable {
+        nonisolated(unsafe) var raw: String?
+        nonisolated(unsafe) var hashed: String?
+    }
+    let captured = Captured()
 
     init(result: Result<AppleSignInResult, Error>) {
         self.result = result
     }
 
     func authenticate(nonceRaw: String, hashedNonce: String) async throws -> AppleSignInResult {
-        try result.get()
+        captured.raw = nonceRaw
+        captured.hashed = hashedNonce
+        return try result.get()
     }
 }
 
