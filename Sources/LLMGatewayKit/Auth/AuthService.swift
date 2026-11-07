@@ -69,7 +69,7 @@ public final class AuthService {
         self.googleProvider = googleProvider
     }
 
-    public func authenticate(identityToken: Data, fullName: String?, appleSub: String) async throws {
+    public func authenticate(identityToken: Data, fullName: String?, appleSub: String, rawNonce: String? = nil) async throws {
         invalidateInFlightRefresh()
         let expectedGeneration = credentialGeneration
         guard let tokenString = String(data: identityToken, encoding: .utf8) else {
@@ -92,6 +92,13 @@ public final class AuthService {
             "identityToken": tokenString,
             "deviceName": config.deviceName,
         ]
+        // Sign in with Apple 把 nonce 的 SHA-256 写进 id_token 的 nonce claim。网关
+        // （`src/auth/apple.ts` 的 `if (rawNonce)`）拿到 raw 后会自己 SHA-256 再比对——不给
+        // 就完全不校验，id_token 被截获即可重放。所以这里必须把 raw nonce 带上：
+        // 绑定链路 `linkAppleAccount` 早就传了，登录主路径以前漏了。
+        if let rawNonce {
+            body["nonce"] = rawNonce
+        }
         if let appId = config.appId { body["appId"] = appId }
         if let effectiveName, !effectiveName.isEmpty {
             body["displayName"] = effectiveName
@@ -120,7 +127,11 @@ public final class AuthService {
     public func authenticateInteractively() async throws {
         let pair = NonceGenerator.makePair()
         let result = try await appleBridge.authenticate(nonceRaw: pair.raw, hashedNonce: pair.hashedSHA256)
-        try await authenticate(identityToken: Data(result.identityToken.utf8), fullName: result.fullName, appleSub: result.appleUserId)
+        try await authenticate(
+            identityToken: Data(result.identityToken.utf8),
+            fullName: result.fullName,
+            appleSub: result.appleUserId,
+            rawNonce: pair.raw)
     }
 
     /// provider 中立入口：apple 走既有路径（含 pendingDisplayName 重放），google 打 /auth/google。
@@ -130,7 +141,8 @@ public final class AuthService {
             try await authenticate(
                 identityToken: Data(credential.idToken.utf8),
                 fullName: credential.displayName,
-                appleSub: credential.providerUid)
+                appleSub: credential.providerUid,
+                rawNonce: credential.rawNonce)
         case .google:
             invalidateInFlightRefresh()
             let expectedGeneration = credentialGeneration
