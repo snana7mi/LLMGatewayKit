@@ -21,16 +21,20 @@ public final class GoogleSignInBridge: GoogleSignInProviding {
         guard let presenter = Self.topViewController() else {
             throw AuthError.serverError("No presenting view controller")
         }
-        // GoogleSignIn 8.x 的 signIn API 无 nonce 参数（仅 7.1 短暂存在过）→ rawNonce 传 nil。
-        // 网关侧 nonce 校验本就是可选的；id_token 仍经 JWKS 验签 + aud/iss/exp 校验。
+        // GoogleSignIn 10.x 起 signIn 接受自定义 nonce（9.0 引入，`#637` 在 10.1.0 修了
+        // Device Policy 重启后丢失 nonce 的问题）。交给 SDK 的是 hashedNonce，Google 把它写进
+        // id_token 的 nonce claim；raw 交给网关后由 `sha256Hex(raw)` 比对。
+        // 与 Apple 侧同一套约定，`NonceGenerator.makePair()` 保证两者是同一对。
+        let pair = NonceGenerator.makePair()
         do {
             let result = try await GIDSignIn.sharedInstance.signIn(
-                withPresenting: presenter, hint: nil, additionalScopes: nil)
+                withPresenting: presenter, hint: nil, additionalScopes: nil, nonce: pair.hashedSHA256)
             guard let idToken = result.user.idToken?.tokenString,
                   let uid = result.user.userID else {
                 throw AuthError.invalidResponse
             }
-            return SignInCredential(provider: .google, idToken: idToken, providerUid: uid, displayName: nil, rawNonce: nil)
+            return SignInCredential(
+                provider: .google, idToken: idToken, providerUid: uid, displayName: nil, rawNonce: pair.raw)
         } catch let error as GIDSignInError where error.code == .canceled {
             throw AuthError.userCancelled
         }

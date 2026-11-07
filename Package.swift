@@ -14,7 +14,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/RevenueCat/purchases-ios-spm.git", from: "5.0.0"),
-        .package(url: "https://github.com/google/GoogleSignIn-iOS.git", from: "8.0.0"),
+        .package(url: "https://github.com/google/GoogleSignIn-iOS.git", from: "10.1.0"),
     ],
     targets: [
         .target(
