@@ -12,6 +12,8 @@ public struct AccountUser: Codable, Equatable, Sendable {
     public let bio: String?
     /// 已绑定的登录 provider（"apple"/"google"/"email"）；旧网关响应无此字段 → nil
     public let linkedProviders: [String]?
+    /// paid 时 true = 有真实商店期（含商店试用），false = 仅赠送。free 或旧网关响应 → nil
+    public let proStoreBacked: Bool?
 
     public init(
         id: String,
@@ -23,7 +25,8 @@ public struct AccountUser: Codable, Equatable, Sendable {
         avatarURL: String?,
         memberNo: Int? = nil,
         bio: String? = nil,
-        linkedProviders: [String]? = nil
+        linkedProviders: [String]? = nil,
+        proStoreBacked: Bool? = nil
     ) {
         self.id = id
         self.email = email
@@ -35,5 +38,6 @@ public struct AccountUser: Codable, Equatable, Sendable {
         self.memberNo = memberNo
         self.bio = bio
         self.linkedProviders = linkedProviders
+        self.proStoreBacked = proStoreBacked
     }
 }
